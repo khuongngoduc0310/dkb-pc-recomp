@@ -24,6 +24,7 @@
 #include "cfg.h"
 #include "fs.h"
 #include "host.h"
+#include "lod_override.h"
 #include "romfs_config.h"
 #include "romfs_path.h"
 #include "platform/platform.h"
@@ -52,6 +53,8 @@ static PlatMutex lock = PLAT_MUTEX_INIT;
 static uint64_t handles[NH];         // file index + 1; 0 is free
 static uint32_t handle_ovl[NH];      // overlay slot + 1 of an open handle, 0 = original
 static PlatFile *handle_file[NH];    // the handle's open overlay file, when handle_ovl is set
+static uint8_t *handle_lod[NH];      // patched LOD bytes, when LOD_DISTANCE changes the file
+static uint64_t handle_lod_size[NH];
 static Overlay *overlays;            // sorted by RomFS index after overlay_init
 static size_t noverlay, overlay_cap;
 static char **added;                 // RomFS paths of the added files, sorted; added[k] is index file_count + k
@@ -579,6 +582,41 @@ uint32_t romfs_mount(const char *name) {
     return 0;
 }
 
+// A patched copy of a LOD parameter file, or NULL when the setting is off, the file does not parse or it is too big.
+static uint8_t *lod_patched_copy(const char *path, uint64_t i, uint32_t ov, PlatFile *f, float scale,
+                                 uint64_t *out_size) {
+    uint64_t base, size;
+    if (ov) {
+        base = 0;
+        size = overlays[ov - 1].size;
+    } else {
+        Entry e = entry(i);
+        base = e.offset;
+        size = e.size;
+    }
+    if (!size || size > (1u << 20)) return NULL;
+    uint8_t *copy = malloc((size_t)size);
+    if (!copy) return NULL;
+    uint64_t done = 0;
+    while (done < size) {
+        uint32_t chunk = size - done > READ_CHUNK ? READ_CHUNK : (uint32_t)(size - done);
+        int64_t n = read_at(f, copy + done, chunk, base + done);
+        if (n <= 0) {
+            free(copy);
+            return NULL;
+        }
+        done += (uint64_t)n;
+    }
+    size_t fields = lod_override_patch(copy, (size_t)size, scale);
+    if (!fields) {
+        free(copy);
+        return NULL;
+    }
+    rt_log("RomFS: LOD distance %.2fx patched %zu fields in %s", scale, fields, path);
+    *out_size = size;
+    return copy;
+}
+
 uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
     fs_trace("rom", path);
     if (!out || mode != FS_OPEN_READ) return FS_R_UNSUPPORTED_OPEN;
@@ -596,17 +634,31 @@ uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
         if (!f || memcmp(&id, &o->id, sizeof id))
             rt_fatal("RomFS overlay %s is missing or changed since the start check (restart the game)", o->path);
     }
+    uint8_t *lod = NULL;
+    uint64_t lod_size = 0;
+    float lod_scale = lod_override_scale();
+    if (lod_scale != 1.0f && lod_override_path(p)) {
+        lod = lod_patched_copy(p, i, ov, f ? f : image, lod_scale, &lod_size);
+        if (lod && ov && f) {
+            plat_file_close(f);
+            f = NULL;
+        }
+    }
     plat_mutex_lock(&lock);
     for (unsigned j = 1; j < NH; j++)
         if (!handles[j]) {
             handles[j] = i + 1;
-            handle_ovl[j] = ov;
-            handle_file[j] = f;
+            handle_ovl[j] = lod ? 0 : ov;
+            handle_file[j] = lod ? NULL : f;
+            handle_lod[j] = lod;
+            handle_lod_size[j] = lod_size;
             *out = ROMFS_HANDLE_BASE + j;
             plat_mutex_unlock(&lock);
             return 0;
         }
     plat_mutex_unlock(&lock);
+    free(lod);
+    if (ov && f) plat_file_close(f);
     rt_fatal("RomFS file handle table full (%d)", NH);
 }
 
@@ -635,9 +687,22 @@ static int handle_source(uint64_t h, PlatFile **f, uint64_t *base, uint64_t *siz
 }
 
 uint32_t romfs_read(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uint64_t size) {
+    if (!out || offset < 0 || !romfs_handle(h)) return FS_R_INVALID;
+    uint64_t j = h - ROMFS_HANDLE_BASE;
+    plat_mutex_lock_shared(&lock);
+    const uint8_t *lod = handle_lod[j];
+    uint64_t lod_size = handle_lod_size[j];
+    plat_mutex_unlock_shared(&lock);
+    if (lod) {
+        if ((uint64_t)offset > lod_size || (!buffer && size)) return FS_R_INVALID;
+        uint64_t n = size < lod_size - (uint64_t)offset ? size : lod_size - (uint64_t)offset;
+        if (n) memcpy(buffer, lod + offset, (size_t)n);
+        *out = n;
+        return 0;
+    }
     PlatFile *f;
     uint64_t base, fsize;
-    if (!out || offset < 0 || !handle_source(h, &f, &base, &fsize)) return FS_R_INVALID;
+    if (!handle_source(h, &f, &base, &fsize)) return FS_R_INVALID;
     if ((uint64_t)offset > fsize || (!buffer && size)) return FS_R_INVALID;
     uint64_t n = size < fsize - (uint64_t)offset ? size : fsize - (uint64_t)offset, done = 0;
     if (f == image && image_map) {
@@ -655,25 +720,38 @@ uint32_t romfs_read(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uin
 }
 
 uint32_t romfs_size(int64_t *out, uint64_t h) {
+    if (!out || !romfs_handle(h)) return FS_R_INVALID;
+    uint64_t j = h - ROMFS_HANDLE_BASE;
+    plat_mutex_lock_shared(&lock);
+    const uint8_t *lod = handle_lod[j];
+    uint64_t lod_size = handle_lod_size[j];
+    plat_mutex_unlock_shared(&lock);
+    if (lod) {
+        *out = (int64_t)lod_size;
+        return 0;
+    }
     PlatFile *f;
     uint64_t base, size;
-    if (!out || !handle_source(h, &f, &base, &size)) return FS_R_INVALID;
+    if (!handle_source(h, &f, &base, &size)) return FS_R_INVALID;
     *out = (int64_t)size;
     return 0;
 }
 
 void romfs_close(uint64_t h) {
-    PlatFile *f;
-    uint64_t base, size;
-    if (!handle_source(h, &f, &base, &size))
-        rt_fatal("RomFS: close of invalid file handle %#llx", (unsigned long long)h);
+    if (!romfs_handle(h)) rt_fatal("RomFS: close of invalid file handle %#llx", (unsigned long long)h);
     uint64_t j = h - ROMFS_HANDLE_BASE;
     plat_mutex_lock(&lock);
+    uint8_t *lod = handle_lod[j];
     PlatFile *of = handle_ovl[j] ? handle_file[j] : NULL;
+    int valid = handles[j] != 0;
     handles[j] = 0;
     handle_ovl[j] = 0;
     handle_file[j] = NULL;
+    handle_lod[j] = NULL;
+    handle_lod_size[j] = 0;
     plat_mutex_unlock(&lock);
+    if (!valid) rt_fatal("RomFS: close of invalid file handle %#llx", (unsigned long long)h);
+    free(lod);
     if (of) plat_file_close(of);
 }
 

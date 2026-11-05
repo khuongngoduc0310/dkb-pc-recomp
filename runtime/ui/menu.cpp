@@ -778,6 +778,9 @@ static void tab_advanced(float scale) {
 
     opt_group(UI_MENU_GROUP_FIXES);
     opt_toggle("TOTK_LOD_GUARD", UI_MENU_LOD_GUARD, UI_MENU_LOD_GUARD_DESC);
+    static const UiTextId lod_distance[] = {UI_MENU_LOD_DISTANCE_DEFAULT, UI_MENU_LOD_DISTANCE_HALF,
+                                            UI_MENU_LOD_DISTANCE_QUARTER};
+    opt_choice("TOTK_LOD_DISTANCE", UI_MENU_LOD_DISTANCE, lod_distance, 3, UI_MENU_LOD_DISTANCE_DESC);
     opt_toggle("TOTK_FIX_C0", UI_MENU_FIX_C0, UI_MENU_FIX_C0_DESC);
     opt_toggle("TOTK_FIX_ZERO", UI_MENU_FIX_ZERO, UI_MENU_FIX_ZERO_DESC);
     opt_toggle("TOTK_BIND_SKIP", UI_MENU_BIND_SKIP, UI_MENU_BIND_SKIP_DESC);

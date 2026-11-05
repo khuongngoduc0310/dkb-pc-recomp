@@ -68,6 +68,9 @@
 # Wait for the game to finish rewriting level-of-detail data before the GPU reads it: stops objects flashing in the
 # wrong place and a flat far field for a frame.
 # lod_guard = 1
+# Switch distant voxel meshes to lower detail sooner: default, half or quarter the switch distance. Read at the next
+# start, and applies on top of any romfs mod that changes the same values.
+# lod_distance = default
 # Fill the driver-reserved constant bank c0 (storage sizes, dispatch size, point size, base instance) instead of zeros.
 # fix_c0 = 1
 # Bananza on NVIDIA: skip the light-quad draws that fault the GPU after the first guide movie (#9).

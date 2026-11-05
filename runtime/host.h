@@ -303,6 +303,7 @@ void rt_boot(void);                                        // boot.c
 // modules, registers its host functions, then seals (hostfn_seal, or implicitly at the first rt_call). Return the
 // process exit code.
 int probe_cfg(void);                                       // cfg_probe.c
+int probe_lod(void);                                       // lod_probe.c
 int probe_dpi(void);                                       // dpi_probe_win.c (Windows only)
 int probe_loader(void), probe_kernel(void), probe_ipc(void), probe_ipc_lifetime(void), probe_services(void), probe_fs(void);
 int probe_gfx_abi(void);                                   // gfx_abi_probe.c
