@@ -44,7 +44,7 @@ int gfx_shader_resources(const GfxShader *s,int kind,const GfxShaderRes **out) {
 static int enabled,fix_c0,warnings,async_on,translate_fail,translate_pending,translations,awaits,last_stage;
 static GfxShaderAnswers last_answers;
 static const uint8_t *native_code;
-int cfg_bool(const char *name) { return !strcmp(name,"TOTK_FIX_C0")?fix_c0:enabled; }
+int cfg_bool(const char *name) { return !strcmp(name,"TOTK_NATIVE_GS")?0:!strcmp(name,"TOTK_FIX_C0")?fix_c0:enabled; }
 static int c0_on(void) { return fix_c0; }
 static void warn_once(int key,const char *format,...) { (void)key;(void)format;warnings++; }
 uint64_t nvn2_origin(const uint8_t *code) { return code==native_code?17:0; }
@@ -74,7 +74,11 @@ const GfxShader *gfx_shader_await(int stage,const uint8_t *ctl,const uint8_t *co
     slot_end = draw.index('static uint8_t type_of_handle(', slot_start)
     where = base.index('static int nvn_stage_of(')
     base = base[:where] + draw[stage_start:stage_end] + draw[slot_start:slot_end] + base[where:]
-    extra = [function(shader, 'int gfx_shader_is_nvn2('), function(pipeline, 'uint8_t vk_geometry_input('),
+    # The native path stays off here: tests/geometry_feature_flags_test.py and geometry_native_control_cache_test.py cover it.
+    native = (function(draw, 'static int native_gs_on(') + '\nstatic const GfxShader *native_gs_vs,*native_gs_fs;\n'
+              'static const uint8_t *native_gs_control(const uint8_t *c,const uint8_t *code,uint32_t len) '
+              '{(void)c;(void)code;(void)len;abort();}\n')
+    extra = [function(shader, 'int gfx_shader_is_nvn2('), function(pipeline, 'uint8_t vk_geometry_input('), native,
              function(draw, 'static const GfxShader *shader_for('), function(draw, 'static int experimental_geometry_on('),
              function(draw, 'static int geometry_draw('), function(draw, 'static int geometry_feedback_safe(')]
 

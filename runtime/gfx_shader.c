@@ -542,7 +542,8 @@ static void shader_free(GfxShader *s) {
     free(s->spirv), free(s->reflection), free(s);
 }
 
-static int reflect(GfxShader *s, int require_c0);
+enum { REFLECT_REQUIRE_C0 = 1, REFLECT_LOWERED_BODY = 2 };   // flags of reflect, disk_load_from and disk_load
+static int reflect(GfxShader *s, int flags);
 
 // Inserts s, or frees it and returns the entry another thread inserted first.
 static GfxShader *mem_insert(GfxShader *s) {
@@ -597,7 +598,7 @@ static int spirv_complete(const uint32_t *w, uint64_t n) {
 
 // Reads <key>.spv and <key>.res.json from the pack (packed 1) or the loose files; NULL if either is missing or
 // malformed. iid: the input id, NULL when the caller sets it.
-static GfxShader *disk_load_from(const uint8_t key[32], const uint8_t *iid, int packed, int require_c0) {
+static GfxShader *disk_load_from(const uint8_t key[32], const uint8_t *iid, int packed, int flags) {
     static volatile int32_t n_bad;
     char hex[65], p[PATH_CAP + 80];
     key_hex(key, hex);
@@ -626,15 +627,15 @@ static GfxShader *disk_load_from(const uint8_t key[32], const uint8_t *iid, int 
     s->words = spv_size / 4;
     s->reflection = (char *)res;
     s->reflection_size = res_size;
-    if (!reflect(s, require_c0)) { shader_free(s); return NULL; }
+    if (!reflect(s, flags)) { shader_free(s); return NULL; }
     return s;
 }
 
 // The pack, then the loose files (a newer translation of a key the pack holds a bad copy of); NULL when neither has a
 // valid pair (the caller translates again and writes loose files).
-static GfxShader *disk_load(const uint8_t key[32], const uint8_t *iid, int require_c0) {
-    GfxShader *s = pack_n ? disk_load_from(key, iid, 1, require_c0) : NULL;
-    return s ? s : disk_load_from(key, iid, 0, require_c0);
+static GfxShader *disk_load(const uint8_t key[32], const uint8_t *iid, int flags) {
+    GfxShader *s = pack_n ? disk_load_from(key, iid, 1, flags) : NULL;
+    return s ? s : disk_load_from(key, iid, 0, flags);
 }
 
 // ---- request building
@@ -1089,7 +1090,8 @@ static int storage_contract_version(const char *js, const char *end) {
     return json_uint(js, end, "storage_candidates_version", &version) && version <= 1 ? (int)version : -1;
 }
 
-static int reflect(GfxShader *s, int require_c0) {
+static int reflect(GfxShader *s, int flags) {
+    const int require_c0 = flags & REFLECT_REQUIRE_C0;
     static const char *const kinds[GFX_RES_KINDS] = {"cbufs", "sbufs", "textures", "images"};
     const char *js = s->reflection;
     const char *end = js + strlen(js);
@@ -1160,7 +1162,11 @@ static int reflect(GfxShader *s, int require_c0) {
         uint32_t locations = 0;
         for (unsigned i = 0; i < 32; i++)
             if (!(s->geometry_skip[1 + i / 8] >> ((i % 8) * 4) & 15)) locations |= 1u << i;
-        if (s->in_mask != locations || s->out_mask != locations) return 0;
+        // Portable-v2 metadata describes this exact interface. Only a stage whose control says it was lowered from a
+        // native one (nvn_geometry_control_pack_lowered) may read or declare more than it forwards.
+        if (flags & REFLECT_LOWERED_BODY) {
+            if ((s->in_mask & locations) != locations || (s->out_mask & locations) != locations) return 0;
+        } else if (s->in_mask != locations || s->out_mask != locations) return 0;
         for (unsigned i = 0; i < 32; i++) if (locations >> i & 1) {
             const GfxShaderIo *a = &s->in[i], *b = &s->out[i];
             if (a->scalar_bits != 32 || b->scalar_bits != 32 || a->comps != 4 || b->comps != 4 ||
@@ -1607,6 +1613,7 @@ typedef struct {
     GfxShaderGeometry geometry;
     uint32_t geometry_skip[8];
     int geometry_source_passthrough;
+    int lowered_body;                                      // nvn_geometry_control_is_lowered
     uint32_t length, c1_len;
     const uint8_t *c1;
     uint8_t code_hash[32];
@@ -1710,6 +1717,7 @@ static int req_init(Req *r, int stage, const uint8_t *control, const uint8_t *co
             r->geometry.version = GFX_GEOMETRY_PASSTHROUGH_VERSION;
             r->geometry.max_output_vertices = 3;
             r->geometry_source_passthrough = 1;
+            r->lowered_body = nvn_geometry_control_is_lowered(control);
         }
     } else if (r->geometry_input || !memcmp(control + NVN_GEOMETRY_CONTROL_OFFSET, "TKGSMETA", 8))
         return fail("geometry input supplied for another stage", NULL), 0;
@@ -1733,7 +1741,8 @@ static int shader_matches_request(const GfxShader *s, const Req *r) {
 
 static GfxShader *request_disk_load(const Req *r, const uint8_t key[32], const uint8_t *iid) {
     for (int packed = pack_n ? 1 : 0; packed >= 0; packed--) {
-        GfxShader *s = disk_load_from(key, iid, packed, r->require_c0);
+        GfxShader *s = disk_load_from(key, iid, packed, (r->require_c0 ? REFLECT_REQUIRE_C0 : 0) |
+                                                        (r->lowered_body ? REFLECT_LOWERED_BODY : 0));
         if (!s) continue;
         if (shader_matches_request(s, r)) return s;
         shader_free(s);

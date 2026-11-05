@@ -11,6 +11,9 @@
 #define NVN_GEOMETRY_CONTROL_SIZE 0x40u
 #define NVN_GEOMETRY_CONTROL_PORTABLE 1u
 #define NVN_GEOMETRY_CONTROL_NATIVE 2u
+// Portable metadata made by the host for a lowered native stage (vk_exec_draw.c, native_gs_control). Its body may read
+// or declare more locations than it forwards; nothing else may (gfx_shader.c, reflect).
+#define NVN_GEOMETRY_CONTROL_LOWERED 3u
 
 static inline uint32_t nvn_geometry_control_u32(const uint8_t *p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
@@ -59,7 +62,8 @@ static inline int nvn_geometry_control_get(const uint8_t *control, size_t contro
     const uint8_t *p = control + NVN_GEOMETRY_CONTROL_OFFSET;
     if (memcmp(p, magic, sizeof magic)) return 0;
     if (nvn_geometry_control_u32(p + 8) != 1 || nvn_geometry_control_u32(p + 12) != NVN_GEOMETRY_CONTROL_SIZE ||
-        nvn_geometry_control_u32(p + 16) != NVN_GEOMETRY_CONTROL_PORTABLE ||
+        (nvn_geometry_control_u32(p + 16) != NVN_GEOMETRY_CONTROL_PORTABLE &&
+         nvn_geometry_control_u32(p + 16) != NVN_GEOMETRY_CONTROL_LOWERED) ||
         nvn_geometry_control_u32(p + 20) != 1 || !nvn_geometry_control_context(control, control_size, code, code_size)) return -1;
     for (unsigned i = 56; i < 64; i++) if (p[i]) return -1;
     uint32_t words[8];
@@ -88,6 +92,20 @@ static inline int nvn_geometry_control_pack_portable(uint8_t *control, size_t co
     for (unsigned i = 0; i < 8; i++) nvn_geometry_control_put(envelope + 24 + i * 4, skip[i]);
     memcpy(p, envelope, sizeof envelope);
     return 1;
+}
+
+// The same metadata, marked as made for a lowered native stage. The mark is part of the control, so it enters the
+// shader's identity. Failure leaves every destination byte unchanged.
+static inline int nvn_geometry_control_pack_lowered(uint8_t *control, size_t control_size,
+                                                    const uint8_t *code, uint64_t code_size, const uint32_t skip[8]) {
+    if (!nvn_geometry_control_pack_portable(control, control_size, code, code_size, skip)) return 0;
+    nvn_geometry_control_put(control + NVN_GEOMETRY_CONTROL_OFFSET + 16, NVN_GEOMETRY_CONTROL_LOWERED);
+    return 1;
+}
+
+// For a control nvn_geometry_control_get accepted.
+static inline int nvn_geometry_control_is_lowered(const uint8_t *control) {
+    return nvn_geometry_control_u32(control + NVN_GEOMETRY_CONTROL_OFFSET + 16) == NVN_GEOMETRY_CONTROL_LOWERED;
 }
 
 #endif

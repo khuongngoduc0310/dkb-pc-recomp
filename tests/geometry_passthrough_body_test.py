@@ -3,7 +3,8 @@
 The real compiler consumes authored Maxwell. A deliberately small scalar SPIR-V
 interpreter checks body stores and subsequent copies. Runtime admission uses the
 existing full-TU cache fixture unchanged, with its disclosed fail-loud providers.
-This does not implement native ViewportMask, passthrough linkage or GPU memory.
+This does not implement passthrough linkage or GPU memory, and it checks only that a
+single ViewportMask write translates, not how the primitive is culled.
 """
 import argparse
 import hashlib
@@ -172,7 +173,9 @@ class BodyInputs(unittest.TestCase):
         cls.validations = 0
         packets = {'static': body_program(), 'dynamic': body_program(dynamic=True),
                    'omitted_value': body_program(omit_value=True), 'outside_mask': body_program(location=7),
+                   'viewport_mask': portable.program(extra=[geometry.ast(0, 0x3a0, words=1)]),
                    'reject_ast': portable.program(extra=[geometry.ast(0, 0x70)]),
+                   'reject_viewport_two_words': portable.program(extra=[geometry.ast(0, 0x3a0, words=2)]),
                    'reject_out': portable.program(extra=[geometry.out_vertex()])}
         jobs = []
         for name, code in packets.items():
@@ -295,8 +298,20 @@ class BodyInputs(unittest.TestCase):
                 if not accepted:
                     self.assertFalse(list(cache.rglob('*.spv')))
 
+    def test_only_a_lowered_body_may_exceed_what_it_forwards(self):
+        name = 'outside_mask'
+        result = self.fixture('reflect-flags', args.out / 'runtime-flags', (args.out / (name + '.spv')).resolve(),
+                              (args.out / (name + '.res.json')).resolve())
+        self.assertEqual(result, dict(strict=False, lowered=True))
+        result = self.fixture('reflect-flags', args.out / 'runtime-flags', (args.out / 'static.spv').resolve(),
+                              (args.out / 'static.res.json').resolve())
+        self.assertEqual(result, dict(strict=True, lowered=True))
+
+    def test_viewport_mask_write_is_the_one_explicit_output(self):
+        self.assertEqual(self.replies['viewport_mask'], 'ok viewport_mask')
+
     def test_explicit_output_and_emit_remain_unsupported(self):
-        for name in ('reject_ast', 'reject_out'):
+        for name in ('reject_ast', 'reject_viewport_two_words', 'reject_out'):
             self.assertTrue(self.replies[name].startswith('fail ' + name + ' '))
             self.assertFalse((args.out / (name + '.spv')).exists())
             self.assertFalse((args.out / (name + '.res.json')).exists())

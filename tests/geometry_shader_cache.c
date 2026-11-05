@@ -124,6 +124,18 @@ static void summary(const GfxShader *s, int owned) {
 int main(int argc, char **argv) {
     if (argc < 3) return 2;
     setup(argv[2]);
+    if (!strcmp(argv[1], "reflect-flags")) {
+        if(argc!=5)return 2;
+        int accepted[2]={0,0};
+        for(unsigned i=0;i<2;i++) {
+            uint64_t sn=0,rn=0;GfxShader *s=calloc(1,sizeof *s);
+            s->spirv=(uint32_t *)read_file(argv[3],&sn);s->reflection=(char *)read_file(argv[4],&rn);
+            if(!s->spirv||!s->reflection||sn%4)return 3;
+            s->words=sn/4;s->reflection_size=rn;
+            accepted[i]=reflect(s,i?REFLECT_LOWERED_BODY:0);shader_free(s);
+        }
+        printf("{\"strict\":%s,\"lowered\":%s}\n",accepted[0]?"true":"false",accepted[1]?"true":"false");return 0;
+    }
     if (!strcmp(argv[1], "pack-pass") || !strcmp(argv[1], "get-pass")) {
         if(argc!=7)return 2;
         uint64_t cn=0,nn=0;uint8_t *code=read_file(argv[3],&cn),*control=read_file(argv[4],&nn);

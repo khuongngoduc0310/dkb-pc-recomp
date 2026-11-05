@@ -262,6 +262,8 @@ int main(void) {
         'static int json_objects(', 'static int handle_slot(', 'static void add_res(')]
     enum_start = production.index('enum { OP_ENTRY_POINT')
     pieces.append(production[enum_start:production.index('};', enum_start) + 2])
+    flags_start = production.index('enum { REFLECT_REQUIRE_C0')
+    pieces.append(production[flags_start:production.index('};', flags_start) + 2])
     pieces += [function(production, name) for name in (
         'static int geometry_spirv(', 'static int storage_contract_version(', 'int gfx_shader_is_nvn2(',
         'static int req_init(', 'static size_t build_request(')]

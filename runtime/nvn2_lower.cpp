@@ -69,6 +69,13 @@ Lowered *lower(const uint8_t *control, const uint8_t *code) {
         m.assign(6, 0);
         m.resize(16);
         std::memcpy(m.data() + 6, code, 0x50);
+        // DKB_NATIVE_GS (vk_exec_draw.c, native_gs_control): the portable geometry contract reads a kind-1 version-3
+        // header. The fields it reads sit at the same offsets in the native header, so a lowered geometry stage is
+        // relabelled.
+        if (((w0 >> 10) & 15) == 4) {
+            const uint32_t relabelled = (w0 & ~uint32_t{0x3ff}) | 1u | 3u << 5;
+            std::memcpy(m.data() + 6, &relabelled, 4);
+        }
     }
     m.push_back(0), m.push_back(kMaxwellNop);
     size_t pos = 0x10;   // from the code start
