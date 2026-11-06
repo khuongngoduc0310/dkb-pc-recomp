@@ -208,7 +208,7 @@ class Passthrough(unittest.TestCase):
                ('per_patch', geometry.ast(0, 0x80) | 1 << 31)]
         jobs = [self.packet('unsupported_' + name, fixture.program(extra=[op])) for name, op in ops]
         replies = self.translate(jobs, valid=False)
-        self.assertTrue(all('explicit attribute writes or emission' in reply for reply in replies))
+        self.assertTrue(all('no emission and no attribute writes' in reply for reply in replies))
 
     def test_portable_sph_kind_and_version_are_exact(self):
         jobs = []

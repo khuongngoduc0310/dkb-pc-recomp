@@ -1162,11 +1162,11 @@ static int reflect(GfxShader *s, int flags) {
         uint32_t locations = 0;
         for (unsigned i = 0; i < 32; i++)
             if (!(s->geometry_skip[1 + i / 8] >> ((i % 8) * 4) & 15)) locations |= 1u << i;
-        // Portable-v2 metadata describes this exact interface. Only a stage whose control says it was lowered from a
-        // native one (nvn_geometry_control_pack_lowered) may read or declare more than it forwards.
+        // The mask describes forwarded outputs, but a shader may read an input it does not forward (Bananza has one).
+        // A lowered native body may also declare additional outputs; a raw passthrough shader must match them exactly.
         if (flags & REFLECT_LOWERED_BODY) {
             if ((s->in_mask & locations) != locations || (s->out_mask & locations) != locations) return 0;
-        } else if (s->in_mask != locations || s->out_mask != locations) return 0;
+        } else if ((s->in_mask & locations) != locations || s->out_mask != locations) return 0;
         for (unsigned i = 0; i < 32; i++) if (locations >> i & 1) {
             const GfxShaderIo *a = &s->in[i], *b = &s->out[i];
             if (a->scalar_bits != 32 || b->scalar_bits != 32 || a->comps != 4 || b->comps != 4 ||
@@ -1883,6 +1883,14 @@ static int input_matches_cached(const GfxShader *s, const uint8_t iid[32]) {
         Req r;
         int ok = req_init(&r, in.stage, in.control, in.code, in.length, in.c1, &in.a) &&
                  shader_matches_request(s, &r);
+        if (ok && !r.lowered_body) {
+            // Another cache layer may have allowed extra outputs. The source must grant that policy; a raw portable
+            // shader may read extra inputs, but its outputs still match the passthrough mask exactly.
+            uint32_t locations = 0;
+            for (unsigned i = 0; i < 32; i++)
+                if (!(r.geometry_skip[1 + i / 8] >> ((i % 8) * 4) & 15)) locations |= 1u << i;
+            ok = (s->in_mask & locations) == locations && s->out_mask == locations;
+        }
         if (ok) {
             UseMask m = use_of(s);
             uint8_t key[32], rebuilt[32];
@@ -1896,12 +1904,14 @@ static int input_matches_cached(const GfxShader *s, const uint8_t iid[32]) {
 }
 
 static GfxShader *input_disk_load(const uint8_t key[32], const uint8_t iid[32]) {
-    GfxShader *s = disk_load(key, iid, 0);
+    // Parse either interface policy; input_matches_cached must establish the exact source/input/cache identities
+    // and require the strict interface unless that same matching input grants the lowered-body policy.
+    GfxShader *s = disk_load(key, iid, REFLECT_LOWERED_BODY);
     if (!s || input_matches_cached(s, iid)) return s;
     shader_free(s);
     // A valid JSON/SPIR-V pair in the pack may still describe different inputs.
     // Preserve loose replacement fallback after the stronger v2 admission check.
-    s = pack_n ? disk_load_from(key, iid, 0, 0) : NULL;
+    s = pack_n ? disk_load_from(key, iid, 0, REFLECT_LOWERED_BODY) : NULL;
     if (s && !input_matches_cached(s, iid)) { shader_free(s); s = NULL; }
     return s;
 }

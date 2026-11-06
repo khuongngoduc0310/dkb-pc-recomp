@@ -90,6 +90,8 @@ typedef struct {
     int npools, cpools;
     Range *written;
     int nwritten, cwritten;
+    uint32_t *written_slot;              // note_written: open-addressed index of written, entry = index + 1, 0 empty
+    uint32_t written_slots;              // a power of two
 } CbRes;
 
 static CbRes *cur;
@@ -205,7 +207,7 @@ static void cb_done(void *arg) {   // completion thread
         plat_mutex_unlock(&spare_lock);
         if (!kept) vmaDestroyBuffer(c->vma, r->chunks[i].buf, r->chunks[i].alloc);
     }
-    free(r->written), free(r->pools), free(r->chunks), free(r);
+    free(r->written), free(r->written_slot), free(r->pools), free(r->chunks), free(r);
 }
 
 void vk_exec_draw_new_cb(void) { memset(&B, 0, sizeof B); }
@@ -261,12 +263,35 @@ static uint8_t *scratch(VkExec *ex, uint64_t size, VkBuffer *buf, VkDeviceSize *
     return p;
 }
 
+static uint32_t written_hash(uint64_t addr, uint64_t size) {
+    uint64_t h = (addr ^ size * 0xc2b2ae3d27d4eb4full) * 0x9e3779b97f4a7c15ull;
+    return (uint32_t)(h >> 32);
+}
+
+// Each distinct range once per command buffer, in first-write order. A scene with thousands of written ranges and tens
+// of thousands of draws binding them spent most of the replay searching this list, so the search goes through a table.
 static void note_written(VkExec *ex, uint64_t addr, uint64_t size) {
     CbRes *r = cb_res(ex);
-    for (int i = 0; i < r->nwritten; i++)
-        if (r->written[i].addr == addr && r->written[i].size == size) return;
+    if ((uint32_t)r->nwritten * 2 >= r->written_slots) {
+        uint32_t slots = r->written_slots ? r->written_slots * 2 : 256;
+        uint32_t *table = calloc(slots, sizeof *table);
+        if (!table) rt_fatal("vk: out of memory");
+        for (int i = 0; i < r->nwritten; i++) {
+            uint32_t at = written_hash(r->written[i].addr, r->written[i].size) & (slots - 1);
+            while (table[at]) at = (at + 1) & (slots - 1);
+            table[at] = (uint32_t)i + 1;
+        }
+        free(r->written_slot);
+        r->written_slot = table, r->written_slots = slots;
+    }
+    uint32_t mask = r->written_slots - 1, at = written_hash(addr, size) & mask;
+    for (; r->written_slot[at]; at = (at + 1) & mask) {
+        const Range *w = &r->written[r->written_slot[at] - 1];
+        if (w->addr == addr && w->size == size) return;
+    }
     if (r->nwritten == r->cwritten) r->written = grow(r->written, &r->cwritten, sizeof *r->written);
     r->written[r->nwritten++] = (Range){addr, size};
+    r->written_slot[at] = (uint32_t)r->nwritten;
     vk_mem_gpu_pending(addr, size);
 }
 
@@ -812,7 +837,8 @@ static void answers_for(VkExec *ex, int st, const uint8_t *ctl, uint32_t mask, G
     if (locked) vk_texture_unlock();
 }
 
-// DKB_NATIVE_GS=1 runs lowered native passthrough geometry stages through the portable path (issue #45). Off by default.
+// DKB_NATIVE_GS runs lowered native passthrough geometry stages through the portable path (issue #45). On by default
+// (runtime/cfg.c): without it the destructible terrain draws black; DKB_NATIVE_GS=0 turns it off.
 // Eglantine takes the varyings from the hardware skip mask (Maxwell register 0x1240, translate_program.cpp,
 // LowerGeometryPassthrough); the host does not have that mask for NVN 2 programs, so this infers it: what the vertex
 // stage writes and the fragment stage reads. That is enough for a fragment stage that reads nothing, as the terrain's

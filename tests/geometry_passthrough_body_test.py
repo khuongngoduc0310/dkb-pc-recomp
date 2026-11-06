@@ -8,6 +8,7 @@ single ViewportMask write translates, not how the primitive is culled.
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,13 @@ from xlate_geometry_test import GeometrySpirv
 ROOT = Path(__file__).resolve().parents[1]
 LOCATION = 6
 CANARY = 0xa5a5a5a5
+
+
+def pack_cache(cache):
+    spec = importlib.util.spec_from_file_location('pack_shader_cache', ROOT / 'tools/pack_shader_cache.py')
+    packer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(packer)
+    packer.pack(cache, keep=True)
 POSITIONS = [tuple(0x3e800001 + vertex * 32 + c for c in range(4)) for vertex in range(3)]
 ATTRIBUTES = {LOCATION: [tuple(0x3f000001 + vertex * 32 + c for c in range(4)) for vertex in range(3)]}
 
@@ -275,11 +283,11 @@ class BodyInputs(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         return json.loads(run.stdout.splitlines()[-1])
 
-    def test_runtime_rejects_body_input_outside_passthrough_output(self):
+    def test_runtime_accepts_body_input_outside_passthrough_output(self):
         outside = self.modules['outside_mask']
         self.assertEqual({(storage, outside.locations[var]) for var, (storage, _) in outside.variables.items()
                           if var in outside.locations and storage in (1, 3)}, {(1, LOCATION), (1, 7), (3, LOCATION)})
-        for name, accepted in (('static', True), ('dynamic', True), ('outside_mask', False)):
+        for name in ('static', 'dynamic', 'outside_mask'):
             with self.subTest(packet=name):
                 code = bytes(0x30) + Path(self.jobs[name]['code']).read_bytes()
                 cp, raw, packed = (args.out / (name + suffix) for suffix in ('.fullcode', '.rawcontrol', '.control'))
@@ -294,18 +302,110 @@ class BodyInputs(unittest.TestCase):
                 self.assertTrue(result['accepted'])
                 result = self.fixture('seed-pass', cache, cp.resolve(), packed.resolve(),
                                       (args.out / (name + '.spv')).resolve(), (args.out / (name + '.res.json')).resolve())
-                self.assertEqual(result['accepted'], accepted)
-                if not accepted:
-                    self.assertFalse(list(cache.rglob('*.spv')))
+                self.assertTrue(result['accepted'])
 
-    def test_only_a_lowered_body_may_exceed_what_it_forwards(self):
+    def test_raw_passthrough_may_read_an_input_it_does_not_forward(self):
         name = 'outside_mask'
         result = self.fixture('reflect-flags', args.out / 'runtime-flags', (args.out / (name + '.spv')).resolve(),
                               (args.out / (name + '.res.json')).resolve())
-        self.assertEqual(result, dict(strict=False, lowered=True))
+        self.assertEqual(result, dict(strict=True, lowered=True))
         result = self.fixture('reflect-flags', args.out / 'runtime-flags', (args.out / 'static.spv').resolve(),
                               (args.out / 'static.res.json').resolve())
         self.assertEqual(result, dict(strict=True, lowered=True))
+
+    def test_lowered_body_loads_from_a_cold_input_cache(self):
+        name = 'outside_mask'
+        code = bytes(0x30) + Path(self.jobs[name]['code']).read_bytes()
+        cp, raw, packed = (args.out / ('cold-lowered' + suffix) for suffix in ('.fullcode', '.rawcontrol', '.control'))
+        cp.write_bytes(code)
+        control = bytearray(0x880)
+        struct.pack_into('<II', control, 0x700, len(code), len(code))
+        struct.pack_into('<I', control, 0x714, 2)
+        raw.write_bytes(control)
+        cache = args.out / 'runtime-cold-lowered'
+        result = self.fixture('pack-pass', cache, cp.resolve(), raw.resolve(),
+                              ','.join(map(hex, portable.skip_words([LOCATION]))), packed.resolve())
+        self.assertTrue(result['accepted'])
+        result = self.fixture('seed-lowered', cache, cp.resolve(), packed.resolve(),
+                              (args.out / (name + '.spv')).resolve(), (args.out / (name + '.res.json')).resolve())
+        self.assertTrue(result['accepted'])
+        self.assertEqual(struct.unpack_from('<I', packed.read_bytes(), 0x810)[0], 3)
+        request = self.fixture('request-load', cache, 3, 4, cp.resolve(), packed.resolve())
+        self.assertTrue(request['accepted'])
+        self.assertEqual(request['iid'], result['iid'])
+        for kind in ('input', 'private'):
+            with self.subTest(kind=kind):
+                loaded = self.fixture('load', cache, kind, result['key'], result['iid'])
+                self.assertTrue(loaded['accepted'])
+                self.assertEqual(loaded['iid'], result['iid'])
+        stored = cache / 'in' / (result['iid'] + '.in')
+        source = stored.read_bytes()
+        control_at = 24 + struct.unpack_from('<I', source, 20)[0]
+        unmarked = bytearray(source)
+        struct.pack_into('<I', unmarked, control_at + 0x810, 1)
+        mismatched = bytearray(source)
+        mismatched[control_at] ^= 1
+        for label, data in (('missing', None), ('unmarked', unmarked), ('different-source', mismatched)):
+            if data is None:
+                stored.unlink()
+            else:
+                stored.write_bytes(data)
+            try:
+                for kind in ('input', 'private'):
+                    with self.subTest(source=label, kind=kind):
+                        loaded = self.fixture('load', cache, kind, result['key'], result['iid'])
+                        self.assertFalse(loaded['accepted'])
+            finally:
+                stored.write_bytes(source)
+        pack_cache(cache)
+        for path in (stored, cache / (result['key'] + '.spv'), cache / (result['key'] + '.res.json')):
+            path.unlink()
+        for kind in ('input-packed', 'private-packed'):
+            with self.subTest(kind=kind):
+                loaded = self.fixture('load', cache, kind, result['key'], result['iid'])
+                self.assertTrue(loaded['accepted'])
+                self.assertEqual(loaded['iid'], result['iid'])
+
+    def test_a_matching_loose_source_allows_an_extra_input(self):
+        code = bytes(0x30) + Path(self.jobs['static']['code']).read_bytes()
+        cp, raw, packed = (args.out / ('cross-layer' + suffix) for suffix in ('.fullcode', '.rawcontrol', '.control'))
+        cp.write_bytes(code)
+        control = bytearray(0x880)
+        struct.pack_into('<II', control, 0x700, len(code), len(code))
+        struct.pack_into('<I', control, 0x714, 2)
+        raw.write_bytes(control)
+        cache = args.out / 'runtime-cross-layer'
+        result = self.fixture('pack-pass', cache, cp.resolve(), raw.resolve(),
+                              ','.join(map(hex, portable.skip_words([LOCATION]))), packed.resolve())
+        self.assertTrue(result['accepted'])
+        result = self.fixture('seed-pass', cache, cp.resolve(), packed.resolve(),
+                              (args.out / 'static.spv').resolve(), (args.out / 'static.res.json').resolve())
+        self.assertTrue(result['accepted'])
+        stored = cache / 'in' / (result['iid'] + '.in')
+        source = stored.read_bytes()
+        control_at = 24 + struct.unpack_from('<I', source, 20)[0]
+        wrong = bytearray(source)
+        struct.pack_into('<I', wrong, control_at + 0x810, 3)
+        wrong[control_at] ^= 1
+        stored.write_bytes(wrong)
+        pair = [cache / (result['key'] + suffix) for suffix in ('.spv', '.res.json')]
+        for path, suffix in zip(pair, ('.spv', '.res.json')):
+            path.write_bytes((args.out / ('outside_mask' + suffix)).read_bytes())
+        pack_cache(cache)
+        # The pack holds a marked source with the wrong identity. The loose input is the correct portable source.
+        stored.write_bytes(source)
+        for kind in ('input-packed', 'private-packed'):
+            with self.subTest(kind=kind, loose='extra-io'):
+                loaded = self.fixture('load', cache, kind, result['key'], result['iid'])
+                self.assertTrue(loaded['accepted'])
+        # A replacement with exactly the forwarded input remains usable too.
+        for path, suffix in zip(pair, ('.spv', '.res.json')):
+            path.write_bytes((args.out / ('static' + suffix)).read_bytes())
+        for kind in ('input-packed', 'private-packed'):
+            with self.subTest(kind=kind, loose='strict'):
+                loaded = self.fixture('load', cache, kind, result['key'], result['iid'])
+                self.assertTrue(loaded['accepted'])
+                self.assertEqual(loaded['iid'], result['iid'])
 
     def test_viewport_mask_write_is_the_one_explicit_output(self):
         self.assertEqual(self.replies['viewport_mask'], 'ok viewport_mask')

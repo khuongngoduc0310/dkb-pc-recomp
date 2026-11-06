@@ -724,6 +724,10 @@ static uint32_t *spirv_dual_source(const uint32_t *w, uint64_t n, uint64_t *out_
 // colour output 0's alpha does not compare true with the reference, before blending; NaN fails. So before each return of
 // the entry point this adds: load Location 0, compare its w, OpKill when false. The pipeline is keyed by GKey.alpha, so
 // only draws with a test get this module. NULL when the module has no float vec4 Output at Location 0.
+// Two cases follow Eglantine, our default reference, without an NVN source for either. A game draw that needs the other
+// answer decides them. EarlyFragmentTests stays, so with depth or stencil writes on, a rejected fragment has already
+// written them. NEVER on a module without that output also gets NULL, so the draw runs with no test: Eglantine checks for
+// a colour output first, Ryujinx discards first.
 static uint32_t *spirv_alpha_test(const uint32_t *w, uint64_t n, unsigned func, float ref, uint64_t *out_n) {
     enum { OP_TYPE_BOOL = 20, OP_FUNCTION_END = 56, OP_LOAD = 61, OP_COMPOSITE_EXTRACT = 81, OP_SELECTION_MERGE = 247,
            OP_LABEL = 248, OP_BRANCH_CONDITIONAL = 250, OP_KILL = 252, OP_RETURN = 253, RETURN_WORDS = 26 };

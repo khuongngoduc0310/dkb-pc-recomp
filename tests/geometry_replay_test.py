@@ -155,7 +155,7 @@ void rc_vkCmdPipelineBarrier2(VkCommandBuffer cb,const VkDependencyInfo *di) {
 '''
     lim = function(draw, 'static struct { uint64_t ubo_max,') + ' LIM;'
     memory_helpers = '\n'.join(function(draw, prefix) for prefix in ('static VkDescriptorBufferInfo zero_info(',
-        'static int bind_range(', 'static void note_written(', 'static p_bind_buf guarded_storage_binding(',
+        'static int bind_range(', 'static uint32_t written_hash(', 'static void note_written(', 'static p_bind_buf guarded_storage_binding(',
         'static VkDescriptorBufferInfo ssbo_info(', 'static VkDescriptorBufferInfo ubo_info('))
     barrier_helpers = '\n'.join(function(replay, prefix) for prefix in ('static int has_image(',
         'static VkImageMemoryBarrier2 layout_barrier(', 'static void barrier_to(', 'void vk_exec_barrier('))
