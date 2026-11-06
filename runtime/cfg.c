@@ -489,6 +489,11 @@ static const char *section_of(const char *key) {
     return NULL;
 }
 
+const char *cfg_section(const char *key) {
+    const CfgMeta *m = cfg_meta(key);
+    return m ? section_of(m->key) : NULL;
+}
+
 // "key = value" + eol for entry e (key lower-case)
 static void put_entry(Out *o, const CfgEntry *e, const char *eol) {
     char k[64];

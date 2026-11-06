@@ -304,6 +304,7 @@ void rt_boot(void);                                        // boot.c
 // process exit code.
 int probe_cfg(void);                                       // cfg_probe.c
 int probe_lod(void);                                       // lod_probe.c
+int settings_schema(void);                                 // settings_schema.c
 int probe_dpi(void);                                       // dpi_probe_win.c (Windows only)
 int probe_loader(void), probe_kernel(void), probe_ipc(void), probe_ipc_lifetime(void), probe_services(void), probe_fs(void);
 int probe_gfx_abi(void);                                   // gfx_abi_probe.c

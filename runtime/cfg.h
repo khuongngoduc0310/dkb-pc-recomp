@@ -50,6 +50,8 @@ typedef struct { const char *key, *def, *values; int live; } CfgMeta;
 const CfgMeta *cfg_meta(const char *key);
 // The i-th row (0-based, table order); NULL past the last.
 const CfgMeta *cfg_meta_at(int i);
+// The totk.ini section used for a key, or NULL when it has no section mapping.
+const char *cfg_section(const char *key);
 
 // The setting's value for consumers: the environment or totk.ini value, else the CfgMeta default. name has the TOTK_
 // prefix, like cfg_get; a name without a row is a bug (rt_fatal). A row with an empty default has no fixed value: its

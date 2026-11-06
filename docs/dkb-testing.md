@@ -58,6 +58,12 @@ The settings keep TotK Recomp's `TOTK_` names, so its fixes apply without a rena
 Command-line options: `--seconds S` stops the run after S seconds of game time, and `--shot frame.png` with it saves
 that frame. A shot is for your own debugging; do not post it if it shows game content.
 
+To edit every F1-menu setting before starting the game, double-click `Launch DKB.cmd` or run
+`.venv\Scripts\python.exe tools\launch_dkb.py`. The launcher writes changed values into the `totk.ini` beside `dkb.exe`
+and starts the game. Settings marked “After restart” take effect on that start; settings marked unsupported are not
+implemented by that game build. Environment overrides for changed settings are removed from the child game process.
+`--exe PATH` selects another build.
+
 ## What to report
 
 Open an issue with the issue form, or comment on [#3](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/3)
