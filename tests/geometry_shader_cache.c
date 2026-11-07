@@ -53,7 +53,13 @@ int fixture_thread_spawn(PlatThreadFn fn, void *arg, const char *name, size_t si
     (void)fn; (void)arg; (void)name; (void)size; forbidden("background thread"); return 0;
 }
 const char *cfg_get(const char *name) { (void)name; return NULL; }
-void rt_log(const char *format, ...) { (void)format; }
+void rt_log(const char *format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    vfprintf(stderr, format, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+}
 _Noreturn void rt_fatal(const char *format, ...) { (void)format; forbidden("runtime fatal"); abort(); }
 void rt_sha256(const void *data, size_t size, uint8_t out[32]) { sha256(data, size, out); }
 int nvn2_lower(const uint8_t *control, const uint8_t *code, const uint8_t **out_control, const uint8_t **out_code) {
@@ -313,6 +319,16 @@ int main(int argc, char **argv) {
         printf("\",\"key\":\"");hex_bytes(req.key,32);printf("\",\"iid\":\"");hex_bytes(req.iid,32);
         printf("\",\"final\":%d}\n",req.final);
         free(code);free(control);return 0;
+    }
+    if (!strcmp(argv[1], "trace")) {
+        if (argc != 4) return 2;
+        uint8_t target[32], key[32] = {0};
+        if (!hex32(argv[3], target)) return 3;
+        trace_note(target, "memory hit", key);
+        trace_note(target, "translated", key);
+        trace_note(target, "disk hit", key);
+        puts("{}");
+        return 0;
     }
     return 2;
 }

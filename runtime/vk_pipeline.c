@@ -3606,6 +3606,34 @@ int vk_pipeline_prepare_shaders(void) {
     return rc;
 }
 
+// dkb.exe --seed-dkb-shaders (tools/prepare_dkb_shaders.py): writes <dir>/seed-programs.bin and <dir>/seed-answers.bin
+// from the runtime's recorded lowered programs and answers (shader-programs.bin, shader-answers.bin next to the pipeline
+// cache). No Vulkan device: the translator answers, and so the cache keys, are established by the later --prepare-shaders
+// in the same workspace. DKB_SHADER_DUMP adds the native-stage lowering check.
+int vk_pipeline_seed_dkb_shaders(void) {
+    cache_path_init();
+    if (!P.cache_path[0]) {
+        fprintf(stderr, "seed-dkb-shaders: no pipeline cache path (set TOTK_PIPELINE_CACHE)\n");
+        return 1;
+    }
+    char dir[PLAT_PATH_MAX * 2];
+    snprintf(dir, sizeof dir, "%s", P.cache_path);
+    char *cut = plat_last_sep(dir);
+    if (!cut) return 1;
+    *cut = 0;
+    plat_file_mkdir_p(dir);
+    int rc = gfx_shader_prepare_dkb_seeds(dir, getenv("DKB_SHADER_DUMP"));
+    if (rc) fprintf(stderr, "seed-dkb-shaders: failed (%d)\n", rc);
+    return rc ? 1 : 0;
+}
+
+// dkb.exe --prepare-dkb-shaders: the seed step above, then the normal --prepare-shaders translation and pipeline warm.
+int vk_pipeline_prepare_dkb_shaders(void) {
+    int rc = vk_pipeline_seed_dkb_shaders();
+    if (rc) return rc;
+    return vk_pipeline_prepare_shaders();
+}
+
 // totk.exe --warm-shaders: every variant of shader-prepared.bin built into the driver's disk cache again from the shader
 // cache, without translating the seed. The AMD cache is keyed to the exe path (a relink keeps it: 29,587 variants in
 // 1.8 s) and holds a limited amount: preparing another build dir evicted this one's libraries, and a library a draw

@@ -66,6 +66,70 @@ Result: every stage of the first 3D scene lowers and translates (4,820 of 4,820)
 shared and local memory index (patch 0013), because the game's neural upscaler reads shared memory out of bounds
 ([#9](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/9)).
 
+## Preparing the cache offline
+
+Every `gfx_shader_get` the runtime answers is recorded as a lowered program plus the answers the draw state gave it
+(`shader-programs.bin`, `shader-answers.bin` next to `pipeline-keys.bin`). `tools/prepare_dkb_shaders.py` turns that
+capture into the seed files `gfx_shader_prepare_seed` already understands, then runs the existing `--prepare-shaders`
+translation and pipeline warm:
+
+```text
+.venv\Scripts\python tools\prepare_dkb_shaders.py --build build\dkb100 --work build\dkb-prep\corpus
+.venv\Scripts\python tools\prepare_dkb_shaders.py --build build\dkb100 --work build\dkb-prep\strict --merge-captures <fresh capture> build\dkb100 --dump <dump> --verified-only --pack
+.venv\Scripts\python tools\prepare_dkb_shaders.py --build build\dkb100 --work build\dkb-prep\one --one <64-hex code hash>
+... --dump build\dkb-prep\dump      # verify native stages through nvn2_lower
+... --reference <runtime cache>     # byte-compare with a runtime translation (A/B proof)
+... --coverage                      # list selected/excluded by stage; writes coverage.json
+... --pack                          # fold the verified cache with tools/pack_shader_cache.py
+... --run-only --run-seconds 60 --run-env TOTK_LIB_PREBUILD=0 --trace <code hash>
+```
+
+The workspace is private: the tool always points `TOTK_PIPELINE_CACHE` and `TOTK_SHADER_CACHE` into `--work`, copies
+the records instead of editing them, and never touches the build's working `shader-cache`. `--seed-dkb-shaders` (runtime
+`gfx_shader.c`) writes `seed-programs.bin` and `seed-answers.bin` from the recorded lowered programs, optionally
+lowering every `<fnv>.bin`/`.ctl` of a `DKB_SHADER_DUMP` folder again through the same `nvn2_lower`: matched stages prove
+the lowering still reproduces the recorded bytes, unmatched ones are reported as coverage/lowering drift and never
+drop a recorded variant. `--prepare-shaders` then produces the cache and `shader-prepared.bin` through the normal
+`gfx_shader_get` path, and `--warm-shaders` rebuilds the driver's pipeline cache if the driver evicted it.
+
+`--verified-only` keeps only records whose lowered bytes the dump reproduces, which is the strict corpus. Replaying the
+recorded face and terrain routes (`TOTK_INPUT_SCRIPT=build\face-route.txt` with `profile-face-front`, and
+`terrain-route.txt` with `profile-terrain-test4`, each with a fresh `DKB_SHADER_DUMP`) raised the verified set from
+1,074 to **1,952 of 3,038**; 1,086 records were still excluded. Replaying the same terrain route with
+`profile-run-latest` captured 6,258 stages and raised the set to 2,746; the same route with `profile-face-front` added
+two more, for **2,748 of 3,039**. The other profiles reach the same opening area, so the remaining 291 need content
+those routes do not meet. The face capture held 4,949 native stages and 381 variants, the terrain capture 4,989 stages
+and 734 variants, and all runs had 0 shader failures and 0 validation errors. `--dump` accepts several folders and
+merges them, so every captured route adds to the same strict set.
+`--merge-captures` joins captures by code hash and input id (first source wins); it also accepts a prepared workspace,
+whose full capture is kept in `source-answers.bin`. Each successful preparation writes `dkb-prepare.json` (translator
+and effective identities, host options, dump coverage, seed counts, excluded records, cache and pack) and a `play.cmd`
+that sets the two cache paths and starts `dkb.exe` without touching the build's own cache.
+
+The first strict replays found two GS and four FS variants outside the dump. The GS cause was a matcher bug: a packed
+native-GS record is not found by the control+code map, and two packed variants can share one native stage's code. The
+seed adapter now scans every GS record by code; both verified. Capturing the face replay added the four FS stages. With
+the 2,748-entry strict cache the face (70 s), terrain (240 s) and `profile-run-latest` terrain routes translated
+0 shaders, had 0 xlate stalls and ran at 60 fps; the full 3,039-entry cache also translates 0 on the face route. The
+verifier reports 0 warnings: the two GS mask notices came from the Python parser, which now admits a lowered native GS
+body through the same rule the runtime uses. `--coverage` classifies the remaining 291 records by stage (170 vertex,
+2 geometry, 119 fragment) and writes `coverage.json`. Lowering all 6,886 merged dump stages reproduced none of those
+code hashes, so the tail is capture coverage, not a matcher difference; those variants need sessions that meet their
+native stages. The strict corpus prepares in 19.6 s plus 1.5 s of pipeline warm and packs to 229 MiB; the full
+3,039-record cache is 250 MiB (21.9 s + 1.6 s). The labelled launchers in `build\dkb-prep` are `play-strict.cmd`
+(2,748 verified) and `play-full.cmd` (3,039 recorded, 291 unverified).
+
+The cache key includes the translator identity and the device's host answers (`gfx_shader_set_host`: float64, storage
+alignment, subgroup sizes, gather bias). Preparation therefore runs on the play machine with the same translator,
+GPU/driver and `totk.ini` settings; a translator rebuild or a GPU/driver change re-keys everything and the preparation
+has to be repeated. The records themselves are game-derived: keep the workspace under `build/` and out of commits and
+public reports.
+
+A native dump alone cannot supply the answers (texture/image types, vertex attributes and colour outputs come from the
+draw state), so the first play always captures them; offline preparation covers the corpus the records hold. The
+`DKB_SHADER_TRACE=<64-hex code hash>` diagnostic logs the first cache outcome (memory, disk or translated) for a shader
+and is how a single prepared shader is shown to load without retranslating.
+
 ## Replaying a failed translation locally
 
 Set `DKB_SHADER_FAILURE_DUMP` to an absolute path under an ignored `build/` directory before launching the game.

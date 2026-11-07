@@ -116,6 +116,10 @@ of them.
    The AMD driver keeps its pipeline cache per exe path and holds a limited amount: preparing another build folder can
    evict this one's. `totk.exe --warm-shaders` rebuilds it from the shader cache.
 
+   DKB uses its own preparation: `tools/prepare_dkb_shaders.py` reads the lowered programs and answers the runtime
+   recorded, writes the same seed format, and runs `dkb.exe --prepare-shaders` (details in
+   [dkb-testing.md](dkb-testing.md), "Preparing shaders offline"). It needs a capture from at least one play session.
+
 7. Run. The game keeps running when its window loses the focus (`assume_focus = 1` in `totk.ini`, the default; the
    Game tab switches it). With 0 it pauses, as it does on the Switch when Home is pressed.
 
@@ -203,7 +207,11 @@ exe's own version first, then of the other one.
 
 Shaders: `.venv-py314\Scripts\python tools\shader_census.py --version <ver> --translate` extracts every Maxwell shader
 to `build\<ver>\shaders\` and runs it through the translator and `spirv-val`; failure groups go to `failures.txt`.
-`tools\xlate_smoke.py` checks the translator alone, without game files.
+`tools\xlate_smoke.py` checks the translator alone, without game files. DKB's seed adapter has a headless test that
+authors its own Ampere compute and native GS stages and needs a built `dkb.exe`:
+`.venv\Scripts\python tests\dkb_prepare_test.py`. Its GS case writes two packed records that share one native stage's code
+and checks that both verify by code; it also covers merge, dump-merge and pack reading. `tests\geometry_shader_cache_test.py`
+covers the cache wire vectors, the geometry cache and the `DKB_SHADER_TRACE` log.
 
 ## Reverse engineering (optional)
 

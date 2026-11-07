@@ -9,6 +9,10 @@
 //     --probe-nvn, --probe-nvn-tex, --probe-window, --probe-shader, --probe-vkmem, --probe-vkexec    graphics probes
 //     --probe-astc      the compute ASTC decoder against astc_decode_ldr; needs no game files
 //     --probe-movie     host VP9 movie::Decoder on one RomFS movie; skips without game data
+//     --prepare-shaders translate and warm the seed next to the exe (tools/prepare_shaders.py)
+//     --warm-shaders    rebuild the driver pipeline cache from shader-prepared.bin
+//     --seed-dkb-shaders  write the DKB seed from the captured lowered programs and answers (no Vulkan)
+//     --prepare-dkb-shaders  seed, then translate and warm (tools/prepare_dkb_shaders.py)
 //     --boot            run the game to the first NVN call
 //     --seconds S       run the game (implies --boot's start-up) until the world clock (game time since the loaded
 //                       save's first frame) passed S seconds, then exit 0 at that present
@@ -441,7 +445,7 @@ static int usage(const char *argv0) {
     fprintf(stderr, "usage: %s [--exefs DIR] [--romfs DIR] [--profile DIR] [--selftest | --probe-loader | "
                     "--probe-cfg | --probe-lod | --settings-schema | --probe-dpi | --probe-kernel | --probe-ipc | --probe-ipc-lifetime | --probe-services | --probe-fs | --probe-gfx-abi | "
                     "--probe-nvn | --probe-nvn-tex | --probe-window | --probe-shader | --probe-shader-geometry | --probe-vkmem | "
-                    "--probe-vkexec | --probe-vkgeometry | --probe-vkgeometry-passthrough | --probe-vkgeometry-passthrough-ordering | --probe-vkclear | --probe-vkcopy-astc | --probe-vkpool | --probe-vkreset | --probe-astc | --probe-movie | --prepare-shaders | --warm-shaders | --boot |--seconds S [--shot PNG]]\n", argv0);
+                    "--probe-vkexec | --probe-vkgeometry | --probe-vkgeometry-passthrough | --probe-vkgeometry-passthrough-ordering | --probe-vkclear | --probe-vkcopy-astc | --probe-vkpool | --probe-vkreset | --probe-astc | --probe-movie | --prepare-shaders | --warm-shaders | --seed-dkb-shaders | --prepare-dkb-shaders | --boot |--seconds S [--shot PNG]]\n", argv0);
     return 2;
 }
 
@@ -557,6 +561,8 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--probe-movie")) return probe_movie();
     if (!strcmp(mode, "--prepare-shaders")) return vk_pipeline_prepare_shaders();
     if (!strcmp(mode, "--warm-shaders")) return vk_pipeline_warm_shaders();
+    if (!strcmp(mode, "--seed-dkb-shaders")) return vk_pipeline_seed_dkb_shaders();
+    if (!strcmp(mode, "--prepare-dkb-shaders")) return vk_pipeline_prepare_dkb_shaders();
     if (!strcmp(mode, "--boot")) { cfg.boot = 1; rt_boot(); return 0; }
     return usage(argv[0]);
 }

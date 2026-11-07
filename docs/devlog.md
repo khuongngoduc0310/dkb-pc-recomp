@@ -3,6 +3,60 @@
 Milestones of DKB Recomp, newest first. The plan they follow is [bananza-plan.md](bananza-plan.md); open work is in
 the [roadmap issue](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/10).
 
+## 6 November 2026
+
+- **The DKB shader cache can be prepared offline.** `dkb.exe --seed-dkb-shaders` turns the lowered programs and answers
+  the runtime recorded (`shader-programs.bin`/`shader-answers.bin`) into the existing seed format, optionally lowering a
+  `DKB_SHADER_DUMP` folder again through the same `nvn2_lower` to report coverage and lowering drift.
+  `tools/prepare_dkb_shaders.py` drives it, reuses `--prepare-shaders` and `tools/pack_shader_cache.py`, and verifies the
+  result independently (code hash, use mask, input id, key, stored input, `.res.json` fields and `spirv-val`).
+  A workspace is always separate from the build's `shader-cache`.
+- Measured on the RTX 3060 Ti, same saved tutorial route and 20 s: the captured corpus is 3,036 variants. Preparing all
+  of them offline took 21.7 s of translation plus 4.1 s of pipeline warm; the verified cache is 12,144 files in a
+  249 MiB pack. The first prepared run translated 0 shaders and had 0 shader-translation stalls; the same route with a
+  fresh cache translated 78 shaders and had a 966.7 ms translation stall (1,114 ms worst frame). Moving the recorded
+  corpus into the boot hook instead took 21.6 s and delayed the guest start to 21.8 s, where the prepared cache started
+  the guest in 160 ms (46 ms of prewarm). One prepared compute shader (key `8fe19e21…`) loaded from the pack as
+  `disk hit`; its offline and runtime `.spv`, `.res.json` and `.in` were byte-identical. Single runs, not a benchmark
+  suite; the driver's own pipeline cache was warm for the prepared run.
+- The native dump from that run held 2,725 stages; 1,060 of the older capture's recorded programs matched it exactly,
+  and all 78 programs recorded by the run itself matched. The remaining dump stages were not in the older capture's
+  records; the run's own programs all matching is the evidence that this is capture coverage, not lowering drift.
+- **The strict subset starts at 1,060 of 3,036 and the capture loop closes the route.** `--verified-only` keeps only
+  records whose lowered bytes a native dump reproduces; `--merge-captures` joins sessions by code hash and input id;
+  `--dump` accepts several folders and merges them; `dkb-prepare.json` records the identities, coverage and exclusions;
+  `play.cmd` starts the game from the private workspace; `--run-only` replays a packed cache without preparing it
+  again. The tutorial dump verified 1,060 records, prepared in 8.4 s plus 0.6 s of pipeline warm and packed to 97 MiB;
+  that route then translated 14 variants whose native stages the dump did not hold. Capturing the same route with
+  `DKB_SHADER_DUMP` added exactly those 14 stages; the strict set became 1,074 (1,962 excluded) and the same 20 s route
+  translated 0, with 0 shader-translation stalls. The repeated benchmark (2 runs, fresh shader/pipeline caches,
+  `TOTK_LIB_PREBUILD=0`) had 102 translations, 3.5 % xlate and a 33.6 ms slowest translation in the baseline, against
+  0/0 %/0 ms prepared; the driver's own cache was already warm, so that understates a first-ever cold run. The excluded
+  records need their own captures; this is coverage, not a key mismatch. The one-shader proof is unaffected.
+- **The recorded face and terrain routes raised the strict corpus to 2,748 of 3,039.** The face route
+  (`build/face-route.txt`, `profile-face-front`) captured 4,949 native stages and 381 variants; the terrain route
+  (`build/terrain-route.txt`, `profile-terrain-test4`) captured 4,989 stages and 734 variants; both runs had 0 shader
+  failures and 0 validation errors. The first strict replays found two GS and four FS variants outside the dump. The GS
+  cause was a real matcher bug: a packed native-GS record is not found by the control+code map, and two packed variants
+  share one native stage's code. The seed adapter now scans every GS record by code; both verified. Capturing the face
+  replay added the four FS stages. Replaying the terrain route with `profile-run-latest` captured 6,258 stages and added
+  794 variants that the earlier dumps did not cover; the same route with `profile-face-front` added two more. The strict
+  set is 2,748 (2,746 exact + 2 native GS), 291 excluded, prepared in 19.6 s plus 1.5 s of pipeline warm and packed to
+  229 MiB; the face, terrain and `profile-run-latest`
+  terrain routes then translated 0 shaders with 0 xlate stalls at 60 fps. The full 3,039-record cache is 250 MiB
+  (21.9 s + 1.6 s) and also translates 0 on the face route. The verifier reports 0 warnings; the two GS mask notices
+  were its parser, now matching the runtime's lowered-GS rule. `--coverage` writes `coverage.json` and splits the 291
+  excluded records into 170 vertex, 2 geometry and 119 fragment. Lowering all 6,886 merged dump stages reproduced none
+  of those code hashes, so the tail is capture coverage, not a matcher difference. A comparison with the runtime cache
+  from the `profile-run-latest` capture found all 1,037 shared `.spv` files byte-identical; 510 `.res.json`/`.in` pairs
+  matched exactly and 527 differed only in the draw-specific `key` field and answers outside the use mask. The headless
+  seed test now authors a native GS stage and two packed variants that share its code, and covers merge/dump/pack; the
+  cache test covers the trace log. A three-run face benchmark (70 s, fresh exe per run) translated 465 shaders in the
+  baseline and 0 prepared, at 60.1 against 60.0 fps mean and 55.6 against 57.1 fps 1 % low; the driver's own cache
+  varied across sessions, so the translation count is the reliable metric. With the same 10,992 entries, packed guest
+  start was 173–174 ms against 206–330 ms loose after the first run. The labelled launchers are
+  `build/dkb-prep/play-strict.cmd` (recommended) and `play-full.cmd`.
+
 ## 5 November 2026
 
 - **The destructible terrain renders by default.** `native_gs` (#67) is now on unless `TOTK_NATIVE_GS=0`. On an RTX

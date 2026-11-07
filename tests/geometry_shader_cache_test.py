@@ -149,6 +149,25 @@ class GeometryCache(unittest.TestCase):
         self.run_fixture('learn', records[0]['hash'], cache=cache)
         self.assertEqual([self.identity(3, topology, cache)['known'] for topology in range(1, 6)], [1, 0, 0, 0, 0])
 
+    def test_trace_logs_once_per_target(self):
+        cache = args.out / 'trace-cache'
+        cache.mkdir(parents=True, exist_ok=True)
+        target = '42' * 32
+        env = {k: v for k, v in os.environ.items() if k.upper() in {
+            'SYSTEMROOT', 'WINDIR', 'PATH', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'SYSTEMDRIVE'}}
+        env['DKB_SHADER_TRACE'] = target
+        run = subprocess.run([str(self.exe.resolve()), 'trace', str(cache.resolve()), target],
+                             capture_output=True, text=True, timeout=15, env=env)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(run.stderr.count('trace 4242'), 1, run.stderr)
+        self.assertIn('memory hit', run.stderr)
+        self.assertNotIn('translated', run.stderr)
+        env.pop('DKB_SHADER_TRACE')
+        quiet = subprocess.run([str(self.exe.resolve()), 'trace', str(cache.resolve()), target],
+                               capture_output=True, text=True, timeout=15, env=env)
+        self.assertEqual(quiet.returncode, 0, quiet.stdout + quiet.stderr)
+        self.assertNotIn('gfx_shader: trace', quiet.stderr)
+
     def test_legacy_hash_input_id_and_answer_wire_vectors(self):
         answers = (bytes(i % 10 + 1 for i in range(32)) * 2 + bytes(i % 50 + 1 for i in range(32)) +
                    bytes(i % 3 for i in range(32)) + bytes(i % 3 for i in range(8)) +

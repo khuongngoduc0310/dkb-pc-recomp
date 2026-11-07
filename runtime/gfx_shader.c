@@ -1483,6 +1483,52 @@ static void build_key(const uint8_t code_hash[32], const GfxShaderAnswers *a, co
     rt_sha256(buf, (size_t)(p - buf), key);
 }
 
+// ---- shader trace (DKB_SHADER_TRACE)
+// A comma-separated list of code hashes (64 hex digits) whose first cache outcome this run logs: memory hit, disk hit
+// or a translation. Off by default; tools/prepare_dkb_shaders.py uses it to prove one prepared shader loaded from the
+// cache in a run where other shaders still translate. The code hash, not the cache key, names a program across
+// translator identities and use masks.
+#define TRACE_MAX 8
+static PlatMutex trace_lock = PLAT_MUTEX_INIT;
+static uint8_t trace_hash[TRACE_MAX][32];
+static int trace_n, trace_seen[TRACE_MAX], trace_state;   // 0 uninitialized, 1 off, 2 on
+
+static void trace_init(void) {
+    trace_state = 1;
+    const char *s = getenv("DKB_SHADER_TRACE");
+    if (!s || !*s) return;
+    while (*s && trace_n < TRACE_MAX) {
+        while (*s == ',' || *s == ' ' || *s == '\t') s++;
+        char h[65];
+        int k = 0;
+        while (k < 64 && isxdigit((unsigned char)s[k])) h[k] = s[k], k++;
+        h[k] = 0;
+        if (k != 64 || !hex32(h, trace_hash[trace_n])) {
+            rt_log("gfx_shader: DKB_SHADER_TRACE: bad code hash near '%.32s'", s);
+            break;
+        }
+        trace_n++;
+        s += k;
+        while (*s && *s != ',') s++;
+    }
+    if (trace_n) trace_state = 2, rt_log("gfx_shader: tracing %d shader(s) by code hash", trace_n);
+}
+
+static void trace_note(const uint8_t code_hash[32], const char *how, const uint8_t key[32]) {
+    if (__atomic_load_n(&trace_state, __ATOMIC_ACQUIRE) == 0) trace_init();
+    if (trace_state != 2) return;
+    plat_mutex_lock(&trace_lock);
+    for (int i = 0; i < trace_n; i++)
+        if (!trace_seen[i] && !memcmp(code_hash, trace_hash[i], 32)) {
+            char kh[65] = "-";
+            if (key) key_hex(key, kh);
+            rt_log("gfx_shader: trace %02x%02x%02x%02x: %s key %s", code_hash[0], code_hash[1], code_hash[2],
+                   code_hash[3], how, kh);
+            trace_seen[i] = 1;
+        }
+    plat_mutex_unlock(&trace_lock);
+}
+
 static size_t build_request(char *o0, const char *hex, const char *stage, const char *code_path, const uint8_t *c1,
                             uint32_t c1_len, const GfxShaderAnswers *a, const uint8_t *control) {
     char *o = o0;
@@ -1766,11 +1812,18 @@ static void note_failed(const uint8_t key[32]);
 static const GfxShader *get_one(const Req *r, int stage, const uint8_t *control, const uint8_t *code,
                                 const GfxShaderAnswers *a) {
     GfxShader *s = mem_find(r->key);
-    if (s) return shader_matches_request(s, r) ? (plat_inc64(&n_hits), s) : fail("cached stage contract differs from request", NULL);
+    if (s) {
+        if (!shader_matches_request(s, r)) return fail("cached stage contract differs from request", NULL);
+        trace_note(r->code_hash, "memory hit", s->key);
+        return plat_inc64(&n_hits), s;
+    }
     if (known_failed(r->key)) return NULL;
     paths();
     if (!cache_dir[0]) return fail("no cache directory", NULL);
-    if (r->final && (s = request_disk_load(r, r->key, r->iid))) return plat_inc64(&n_hits), mem_insert(s);
+    if (r->final && (s = request_disk_load(r, r->key, r->iid))) {
+        trace_note(r->code_hash, "disk hit", s->key);
+        return plat_inc64(&n_hits), mem_insert(s);
+    }
     const GfxShader *t = translate(r, stage, control, code, a);
     if (!t) note_failed(r->key);
     return t;
@@ -1966,9 +2019,15 @@ static const GfxShader *translate_one(const Req *r, int stage, const uint8_t *co
     // Another thread may have translated it while this one waited in flight_enter.
     const uint8_t *look = r->final ? key : NULL, *look_iid = r->iid;
     if (!r->final && use_find(r->code_hash, &m)) build_key(r->code_hash, a, &m, mk, miid), look = mk, look_iid = miid;
-    if (look && (s = mem_find(look)))
-        return shader_matches_request(s, r) ? (plat_inc64(&n_hits), s) : fail("cached stage contract differs from request", NULL);
-    if (look && (s = request_disk_load(r, look, look_iid))) return plat_inc64(&n_hits), mem_insert(s);
+    if (look && (s = mem_find(look))) {
+        if (!shader_matches_request(s, r)) return fail("cached stage contract differs from request", NULL);
+        trace_note(r->code_hash, "memory hit", s->key);
+        return plat_inc64(&n_hits), s;
+    }
+    if (look && (s = request_disk_load(r, look, look_iid))) {
+        trace_note(r->code_hash, "disk hit", s->key);
+        return plat_inc64(&n_hits), mem_insert(s);
+    }
 
     uint64_t skip = stage == GFX_STAGE_CS ? 0 : CODE_SKIP;
     char hex[65], code_path[PATH_CAP + 80], spv_path[PATH_CAP + 80], res_path[PATH_CAP + 80];
@@ -2027,6 +2086,7 @@ static const GfxShader *translate(const Req *r, int stage, const uint8_t *contro
     const GfxShader *s = translate_one(r, stage, control, code, a);
     flight_leave(id);
     kern_core_back(&away);
+    if (s) trace_note(r->code_hash, "translated", s->key);
     return s;
 }
 
@@ -2114,7 +2174,11 @@ const GfxShader *gfx_shader_get_async(int stage, const uint8_t *control, const u
 static const GfxShader *get_async_one(Req r, int stage, const uint8_t *control, const uint8_t *code,
                                       const GfxShaderAnswers *a, int *pending) {
     GfxShader *s = mem_find(r.key);
-    if (s) return shader_matches_request(s, &r) ? (plat_inc64(&n_hits), s) : fail("cached stage contract differs from request", NULL);
+    if (s) {
+        if (!shader_matches_request(s, &r)) return fail("cached stage contract differs from request", NULL);
+        trace_note(r.code_hash, "memory hit", s->key);
+        return plat_inc64(&n_hits), s;
+    }
     plat_mutex_lock_shared(&X.lock);
     XWait *w = *wait_slot(r.key);
     int failed = w && w->failed;
@@ -2122,7 +2186,10 @@ static const GfxShader *get_async_one(Req r, int stage, const uint8_t *control, 
     if (w) return *pending = !failed, NULL;
     paths();
     if (!cache_dir[0]) return fail("no cache directory", NULL);
-    if (r.final && (s = request_disk_load(&r, r.key, r.iid))) return plat_inc64(&n_hits), mem_insert(s);
+    if (r.final && (s = request_disk_load(&r, r.key, r.iid))) {
+        trace_note(r.code_hash, "disk hit", s->key);
+        return plat_inc64(&n_hits), mem_insert(s);
+    }
 
     XJob *j = calloc(1, sizeof *j);
     XWait *e = calloc(1, sizeof *e);
@@ -2805,6 +2872,408 @@ int gfx_shader_prepare_seed(const char *dir, int threads, int procs) {
     printf("%s\n", msg);
     free(file), free(recs), free(iid), free(ab);
     return ok ? 0 : 1;
+}
+
+// ---- offline DKB seed preparation (tools/prepare_dkb_shaders.py)
+// shader-programs.bin / shader-answers.bin hold exactly the lowered program and the answers the runtime gave
+// gfx_shader_get, so they are the complete seed for the cache. This writes the seed files gfx_shader_prepare_seed reads.
+// With a native dump it lowers every NVN 2 stage again through nvn2_lower and matches the result against the records:
+// the prepared set stays every recorded variant, the dump only proves the lowering still produces the recorded bytes
+// (or names the stages that no longer match). No key, iid or mask is computed here; prepare_seed goes through the normal
+// gfx_shader_get path.
+typedef struct { uint64_t h; uint32_t rec1; } SeedKey;    // rec1: record ordinal + 1, 0 empty
+typedef struct { SeedKey *v; uint32_t cap, n; } SeedMap;
+typedef struct { uint8_t (*v)[32]; size_t n; } SeedHashes;
+
+typedef struct {
+    const uint8_t *body;
+    uint32_t *offs;
+    size_t n, cap;
+    SeedMap map;
+    int oom;
+} SeedProgs;
+
+typedef struct {
+    const uint8_t *body;
+    const uint32_t *offs;
+    size_t n;
+    const SeedMap *map;
+    const SeedHashes *answers;
+    const uint32_t *gs_list;                              // GS records with TKGSMETA, matched by code only
+    size_t n_gs;
+    const char *dir;
+    uint8_t *seen;                                         // verified record ordinals
+    uint64_t stages, lowered, verified, exact, gs, no_answers, unmatched, skipped, lower_failed, dups;
+    char first_unmatched[80];
+} SeedDump;
+
+static uint32_t seed_u32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+
+// Same bytes the cache hashes (control and code), only as a lookup key. Collisions are resolved by memcmp.
+static uint64_t seed_content_hash(const uint8_t *control, const uint8_t *code, uint32_t len) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint32_t i = 0; i < CONTROL_SIZE; i++) h = (h ^ control[i]) * 0x100000001b3ull;
+    for (uint32_t i = 0; i < len; i++) h = (h ^ code[i]) * 0x100000001b3ull;
+    h ^= h >> 33, h *= 0xff51afd7ed558ccdull, h ^= h >> 33;
+    return h;
+}
+
+static uint32_t seed_slot(uint64_t h, uint32_t cap) { return (uint32_t)(h ^ (h >> 32)) & (cap - 1); }
+
+static int seed_map_grow(SeedMap *m, uint32_t cap) {
+    SeedKey *t = calloc(cap, sizeof *t);
+    if (!t) return 0;
+    for (uint32_t i = 0; i < m->cap; i++)
+        if (m->v[i].rec1) {
+            uint32_t j = seed_slot(m->v[i].h, cap);
+            while (t[j].rec1) j = (j + 1) & (cap - 1);
+            t[j] = m->v[i];
+        }
+    free(m->v), m->v = t, m->cap = cap, m->n = 0;
+    for (uint32_t i = 0; i < cap; i++)
+        if (m->v[i].rec1) m->n++;
+    return 1;
+}
+
+static int seed_map_add(SeedMap *m, uint64_t h, uint32_t ord) {
+    if ((uint64_t)(m->n + 1) * 2 > m->cap && !seed_map_grow(m, m->cap ? m->cap * 2 : 1024)) return 0;
+    uint32_t j = seed_slot(h, m->cap);
+    while (m->v[j].rec1) {
+        if (m->v[j].h == h && m->v[j].rec1 == ord + 1) return 1;
+        j = (j + 1) & (m->cap - 1);
+    }
+    m->v[j].h = h, m->v[j].rec1 = ord + 1, m->n++;
+    return 1;
+}
+
+// The first record with this content hash, or UINT32_MAX. A collision with different bytes is left to the caller's
+// memcmp (it becomes an unmatched dump stage rather than a wrong selection).
+static uint32_t seed_map_find(const SeedMap *m, uint64_t h) {
+    if (!m->cap) return UINT32_MAX;
+    for (uint32_t j = seed_slot(h, m->cap); m->v[j].rec1; j = (j + 1) & (m->cap - 1))
+        if (m->v[j].h == h) return m->v[j].rec1 - 1;
+    return UINT32_MAX;
+}
+
+static int seed_hash_cmp(const void *a, const void *b) { return memcmp(a, b, 32); }
+
+static int seed_hash_has(const SeedHashes *l, const uint8_t h[32]) {
+    return l->v && bsearch(h, l->v, l->n, 32, seed_hash_cmp) != NULL;
+}
+
+// Sorted unique code hashes at `at` in `n` records of `rec` bytes each.
+static int seed_hash_list(const uint8_t *records, size_t n, size_t rec, size_t at, SeedHashes *out) {
+    out->v = NULL, out->n = 0;
+    size_t count = rec ? n / rec : 0, u = 0;
+    uint8_t (*v)[32] = count ? malloc(count * 32) : NULL;
+    if (count && !v) return 0;
+    for (size_t i = 0; i < count; i++) memcpy(v[u++], records + i * rec + at, 32);
+    qsort(v, u, 32, seed_hash_cmp);
+    size_t k = 0;
+    for (size_t i = 0; i < u; i++)
+        if (!i || memcmp(v[i], v[i - 1], 32)) {
+            if (k != i) memcpy(v[k], v[i], 32);
+            k++;
+        }
+    out->v = v, out->n = k;
+    return 1;
+}
+
+static void seed_prog_add(const uint8_t *rec, void *ctx) {
+    SeedProgs *p = ctx;
+    if (p->oom) return;
+    if (p->n == p->cap) {
+        size_t c = p->cap ? p->cap * 2 : 1024;
+        uint32_t *t = realloc(p->offs, c * sizeof *t);
+        if (!t) {
+            p->oom = 1;
+            return;
+        }
+        p->offs = t, p->cap = c;
+    }
+    uint32_t len = seed_u32(rec + 4);
+    p->offs[p->n] = (uint32_t)(rec - p->body);
+    if (!seed_map_add(&p->map, seed_content_hash(rec + 44, rec + 44 + CONTROL_SIZE, len), (uint32_t)p->n)) {
+        p->oom = 1;
+        return;
+    }
+    p->n++;
+}
+
+// One <fnv>.bin/.ctl from DKB_SHADER_DUMP: lower it exactly as nvn_program_set_shaders does, then look for the record
+// whose lowered control and code are the same bytes. A native geometry passthrough record has TKGSMETA and a packed
+// control the draw path built after lowering, so its code bytes alone identify it.
+static int seed_dump_visit(const char *name, void *ctx) {
+    SeedDump *d = ctx;
+    size_t nl = strlen(name);
+    if (nl < 5 || strcmp(name + nl - 4, ".bin")) return 1;
+    char ctl_path[PATH_CAP + 80], bin_path[PATH_CAP + 80];
+    snprintf(bin_path, sizeof bin_path, "%s/%s", d->dir, name);
+    snprintf(ctl_path, sizeof ctl_path, "%s/%.*s.ctl", d->dir, (int)(nl - 4), name);
+    uint64_t cs = 0, bs = 0;
+    uint8_t *ctl = read_file(ctl_path, &cs), *bin = read_file(bin_path, &bs);
+    if (!ctl || !bin) {
+        d->skipped++;
+        free(ctl), free(bin);
+        return 1;
+    }
+    d->stages++;
+    if (!gfx_shader_nvn2_hash(ctl, bin)) {
+        d->skipped++;
+        free(ctl), free(bin);
+        return 1;
+    }
+    const uint8_t *nctl, *ncode;
+    if (!nvn2_lower(ctl, bin, &nctl, &ncode)) {
+        d->lower_failed++;
+        free(ctl), free(bin);
+        return 1;
+    }
+    d->lowered++;
+    uint32_t len = seed_u32(nctl + 0x704);
+    uint32_t ord = UINT32_MAX;
+    const uint8_t *rec = NULL;
+    int exact = 0;
+    if (len && len <= (64u << 20)) {
+        ord = seed_map_find(d->map, seed_content_hash(nctl, ncode, len));
+        if (ord != UINT32_MAX && ord < d->n) {
+            rec = d->body + d->offs[ord];
+            uint32_t rlen = seed_u32(rec + 4);
+            const uint8_t *rctl = rec + 44, *rcode = rctl + CONTROL_SIZE;
+            exact = rlen == len && !memcmp(nctl, rctl, CONTROL_SIZE) && !memcmp(ncode, rcode, len);
+        }
+    }
+    // A native passthrough GS record has a packed control the draw path built after lowering, so the control+code map
+    // cannot find it. Its lowered code is unchanged; scan the few GS records for a code match. Several packed variants
+    // can share one native stage's code (different skip masks), so mark every matching record, not just the first.
+    if (!exact) {
+        int any = 0;
+        if (len && len <= (64u << 20))
+            for (size_t k = 0; k < d->n_gs; k++) {
+                uint32_t o = d->gs_list[k];
+                if (o >= d->n) continue;
+                const uint8_t *r = d->body + d->offs[o];
+                if (seed_u32(r + 4) != len || memcmp(ncode, r + 44 + CONTROL_SIZE, len)) continue;
+                any = 1;
+                if (!seed_hash_has(d->answers, r + 12)) {
+                    d->no_answers++;
+                    continue;
+                }
+                if (d->seen[o]) {
+                    d->dups++;
+                    continue;
+                }
+                d->seen[o] = 1, d->verified++, d->gs++;
+            }
+        free(ctl), free(bin);
+        if (!any) {
+            d->unmatched++;
+            if (!d->first_unmatched[0]) snprintf(d->first_unmatched, sizeof d->first_unmatched, "%s", name);
+        }
+        return 1;
+    }
+    free(ctl), free(bin);
+    if (!seed_hash_has(d->answers, rec + 12)) {
+        d->no_answers++;
+        return 1;
+    }
+    if (d->seen[ord]) {
+        d->dups++;
+        return 1;
+    }
+    d->seen[ord] = 1, d->verified++, d->exact++;
+    return 1;
+}
+
+// Writes <dir>/seed-programs.bin and <dir>/seed-answers.bin from the records in <dir>. Every recorded program with an
+// answer is selected; dump_dir (DKB_SHADER_DUMP) only verifies the lowering and reports coverage.
+int gfx_shader_prepare_dkb_seeds(const char *dir, const char *dump_dir) {
+    if (!dir || !*dir) return -1;
+    char ap[PATH_CAP + 32], pp[PATH_CAP + 32], sp[PATH_CAP + 32], sa[PATH_CAP + 32];
+    snprintf(ap, sizeof ap, "%s/shader-answers.bin", dir);
+    snprintf(pp, sizeof pp, "%s/shader-programs.bin", dir);
+    snprintf(sp, sizeof sp, "%s/seed-programs.bin", dir);
+    snprintf(sa, sizeof sa, "%s/seed-answers.bin", dir);
+
+    uint8_t *ab = NULL;
+    size_t an = 0;
+    if (!answers_read(ap, &ab, &an, 0) || an < ANS_REC) {
+        rt_log("gfx_shader: dkb seeds: no usable %s; play once with recording on, or point TOTK_PIPELINE_CACHE at a "
+               "captured workspace", ap);
+        free(ab);
+        return -1;
+    }
+    uint64_t pf_size = 0;
+    uint8_t *pf = read_file(pp, &pf_size);
+    RecHeader ph;
+    if (pf) memcpy(&ph, pf, pf_size >= sizeof ph ? sizeof ph : 0);
+    if (!pf || pf_size < sizeof ph) {
+        rt_log("gfx_shader: dkb seeds: no usable %s", pp);
+        free(pf), free(ab);
+        return -1;
+    }
+    if (memcmp(ph.magic, "TOTKSPRG", 8) || ph.version != PRG_VERSION || ph.rec_size != 0) {
+        rt_log("gfx_shader: dkb seeds: %s has another format or version; it is left unchanged", pp);
+        free(pf), free(ab);
+        return -1;
+    }
+    size_t pn = (size_t)pf_size - sizeof ph;
+    SeedProgs p = {.body = pf + sizeof ph};
+    size_t whole = prg_walk(p.body, pn, seed_prog_add, &p);
+    if (p.oom) {
+        rt_log("gfx_shader: dkb seeds: out of memory reading %s", pp);
+        free(p.offs), free(p.map.v), free(pf), free(ab);
+        return -1;
+    }
+    if (whole != pn) rt_log("gfx_shader: dkb seeds: %s has a torn tail at %zu of %zu bytes; the whole records are used",
+                            pp, whole, pn);
+    if (!p.n) {
+        rt_log("gfx_shader: dkb seeds: %s has no whole program records", pp);
+        free(p.offs), free(p.map.v), free(pf), free(ab);
+        return -1;
+    }
+
+    SeedHashes ah = {0};
+    if (!seed_hash_list(ab, an, ANS_REC, 4, &ah)) {
+        rt_log("gfx_shader: dkb seeds: out of memory");
+        free(p.offs), free(p.map.v), free(pf), free(ab);
+        return -1;
+    }
+    uint8_t *sel = calloc(p.n, 1), *sev = dump_dir && *dump_dir ? calloc(p.n, 1) : NULL;
+    if (!sel || (dump_dir && *dump_dir && !sev)) {
+        rt_log("gfx_shader: dkb seeds: out of memory");
+        free(sel), free(sev), free(ah.v), free(p.offs), free(p.map.v), free(pf), free(ab);
+        return -1;
+    }
+    size_t with_answers = 0;
+    for (size_t i = 0; i < p.n; i++) {
+        const uint8_t *rec = p.body + p.offs[i];
+        if (seed_hash_has(&ah, rec + 12)) sel[i] = 1, with_answers++;
+    }
+    if (!with_answers) {
+        rt_log("gfx_shader: dkb seeds: %zu recorded programs, none with a matching answer record", p.n);
+        free(sel), free(sev), free(ah.v), free(p.offs), free(p.map.v), free(pf), free(ab);
+        return -1;
+    }
+    const char *vo = getenv("DKB_SHADER_VERIFIED_ONLY");
+    int strict = vo && *vo && strcmp(vo, "0");
+    if (strict && !(dump_dir && *dump_dir)) {
+        rt_log("gfx_shader: dkb seeds: DKB_SHADER_VERIFIED_ONLY needs DKB_SHADER_DUMP to verify against");
+        free(sel), free(sev), free(ah.v), free(p.offs), free(p.map.v), free(pf), free(ab);
+        return -1;
+    }
+    size_t excluded = 0;
+
+    uint32_t *gs = NULL;
+    size_t n_gs = 0;
+    if (dump_dir && *dump_dir) {
+        gs = malloc(p.n * sizeof *gs);
+        if (!gs) {
+            rt_log("gfx_shader: dkb seeds: out of memory");
+            free(sel), free(sev), free(ah.v), free(p.offs), free(p.map.v), free(pf), free(ab);
+            return -1;
+        }
+        for (size_t i = 0; i < p.n; i++) {
+            const uint8_t *rec = p.body + p.offs[i];
+            if (rec[0] == GFX_STAGE_GS && !memcmp(rec + 44 + NVN_GEOMETRY_CONTROL_OFFSET, "TKGSMETA", 8))
+                gs[n_gs++] = (uint32_t)i;
+        }
+    }
+    SeedDump d = {.body = p.body, .offs = p.offs, .n = p.n, .map = &p.map, .answers = &ah, .gs_list = gs,
+                  .n_gs = n_gs, .dir = dump_dir, .seen = sev};
+    if (dump_dir && *dump_dir) {
+        if (!plat_dir_exists(dump_dir)) {
+            rt_log("gfx_shader: dkb seeds: DKB_SHADER_DUMP %s is not a folder", dump_dir);
+            free(gs), free(sel), free(sev), free(ah.v), free(p.offs), free(p.map.v), free(pf), free(ab);
+            return -1;
+        }
+        plat_file_list(dump_dir, ".bin", seed_dump_visit, &d);
+        if (!d.stages) {
+            rt_log("gfx_shader: dkb seeds: %s holds no .bin/.ctl stage pairs", dump_dir);
+            free(gs), free(sel), free(sev), free(ah.v), free(p.offs), free(p.map.v), free(pf), free(ab);
+            return -1;
+        }
+    }
+    if (strict) {                                          // only what the dump reproduced byte for byte
+        size_t kept = 0;
+        for (size_t i = 0; i < p.n; i++)
+            if (sel[i]) {
+                if (!d.seen[i]) sel[i] = 0, excluded++;
+                else kept++;
+            }
+        with_answers = kept;
+        if (!with_answers) {
+            rt_log("gfx_shader: dkb seeds: no recorded variant is verified by %s; capture more before a strict seed",
+                   dump_dir);
+            free(gs), free(sel), free(sev), free(ah.v), free(p.offs), free(p.map.v), free(pf), free(ab);
+            return -1;
+        }
+    }
+
+    // Selected program hashes: the answers whose seeds are emitted.
+    uint8_t (*shv)[32] = malloc(with_answers * 32);
+    size_t shn = 0;
+    if (shv)
+        for (size_t i = 0; i < p.n; i++)
+            if (sel[i]) memcpy(shv[shn++], p.body + p.offs[i] + 12, 32);
+    if (!shv) {
+        rt_log("gfx_shader: dkb seeds: out of memory");
+        free(gs), free(sel), free(sev), free(ah.v), free(p.offs), free(p.map.v), free(pf), free(ab);
+        return -1;
+    }
+    qsort(shv, shn, 32, seed_hash_cmp);
+    size_t sk = 0;
+    for (size_t i = 0; i < shn; i++)
+        if (!i || memcmp(shv[i], shv[i - 1], 32)) {
+            if (sk != i) memcpy(shv[sk], shv[i], 32);
+            sk++;
+        }
+    SeedHashes sh = {.v = shv, .n = sk};
+
+    Bytes spb = {0}, sab = {0};
+    RecHeader sph = {{'T', 'O', 'T', 'K', 'S', 'P', 'R', 'G'}, PRG_VERSION, 0};
+    RecHeader sah = {{'T', 'O', 'T', 'K', 'S', 'A', 'N', 'S'}, ANS_VERSION, ANS_REC};
+    int ok = bytes_put(&spb, &sph, sizeof sph);
+    for (size_t i = 0; ok && i < p.n; i++)
+        if (sel[i]) {
+            const uint8_t *rec = p.body + p.offs[i];
+            ok = bytes_put(&spb, rec, (size_t)PRG_HEAD + seed_u32(rec + 4) + seed_u32(rec + 8));
+        }
+    ok = ok && bytes_put(&sab, &sah, sizeof sah);
+    size_t variants = 0;
+    for (size_t o = 0; ok && o + ANS_REC <= an; o += ANS_REC) {
+        const uint8_t *r = ab + o;
+        if (!seed_hash_has(&sh, r + 4)) continue;
+        uint8_t rec[ANS_REC];
+        memcpy(rec, r, sizeof rec);
+        memset(rec + 36, 0, 32);                           // input id: prepare_seed resolves it through the mask
+        ok = bytes_put(&sab, rec, sizeof rec);
+        variants++;
+    }
+    int wrote = ok && variants && plat_file_write_atomic(sp, spb.p, spb.n) &&
+                plat_file_write_atomic(sa, sab.p, sab.n);
+    char msg[900];
+    if (dump_dir && *dump_dir)
+        snprintf(msg, sizeof msg,
+                 "gfx_shader: dkb seeds: %zu programs (%zu with answers), %zu variants; dump %llu stages: %llu lowered, "
+                 "%llu verified (%llu exact, %llu native GS), %llu matched without answers, %llu unmatched, %llu skipped, "
+                 "%llu lowering failures%s%.60s; %zu selected%s, %zu excluded; %s seed-programs.bin (%zu bytes), "
+                 "seed-answers.bin (%zu bytes)",
+                 p.n, with_answers, variants, (unsigned long long)d.stages, (unsigned long long)d.lowered,
+                 (unsigned long long)d.verified, (unsigned long long)d.exact, (unsigned long long)d.gs,
+                 (unsigned long long)d.no_answers, (unsigned long long)d.unmatched, (unsigned long long)d.skipped,
+                 (unsigned long long)d.lower_failed, d.first_unmatched[0] ? ", first unmatched " : "",
+                 d.first_unmatched, with_answers, strict ? " (verified-only)" : "", excluded,
+                 wrote ? "wrote" : "cannot write", spb.n, sab.n);
+    else
+        snprintf(msg, sizeof msg, "gfx_shader: dkb seeds: %zu programs (%zu with answers), %zu variants; no native dump; "
+                 "%s seed-programs.bin (%zu bytes), seed-answers.bin (%zu bytes)", p.n, with_answers, variants,
+                 wrote ? "wrote" : "cannot write", spb.n, sab.n);
+    rt_log("%s", msg);
+    printf("%s\n", msg);
+    free(spb.p), free(sab.p), free(shv), free(gs), free(sel), free(sev), free(ah.v), free(p.offs), free(p.map.v);
+    free(pf), free(ab);
+    return wrote ? 0 : -1;
 }
 
 // The variants the boot prebuild warms, most likely first: every input id play recorded (shader-answers.bin, priority

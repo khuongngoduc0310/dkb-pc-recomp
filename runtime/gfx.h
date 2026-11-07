@@ -82,6 +82,12 @@ void gfx_shader_prepare_recorded(int threads, int procs);
 // totk.exe --prepare-shaders: translates <dir>/seed-answers.bin + seed-programs.bin (tools/prepare_shaders.py) and
 // writes <dir>/shader-prepared.bin (stage, priority, input id per variant). 0 on success.
 int gfx_shader_prepare_seed(const char *dir, int threads, int procs);
+// DKB offline preparation: writes <dir>/seed-programs.bin and <dir>/seed-answers.bin from the runtime's recorded
+// lowered programs and answers (shader-programs.bin, shader-answers.bin in the same directory). With dump_dir, every
+// native NVN 2 stage there is lowered again through nvn2_lower and matched against the records: the seeds keep every
+// recorded variant, the dump only reports coverage and lowering drift. 0 on success, nonzero when the records are
+// absent or nothing can be selected.
+int gfx_shader_prepare_dkb_seeds(const char *dir, const char *dump_dir);
 typedef struct { uint8_t iid[32]; uint8_t stage, prio; } GfxWarmEnt;   // prio 0: met in play; 1..3: prepared
 size_t gfx_shader_warm_list(GfxWarmEnt **out);              // malloc'd; recorded first, then prepared; needs recording on
 // Disk-cache load the caller owns (*owned 1: release it), or the memory cache's entry (*owned 0). NULL if not cached.
