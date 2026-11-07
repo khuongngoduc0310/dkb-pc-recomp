@@ -1,8 +1,36 @@
 # Code patches for Donkey Kong Bananza 1.0.0 main (recomp/patches.py). Each original word is checked against main.
 
 set hidproxy DKB_SKIP_HID_PROXY 1
+set realtime TOTK_REALTIME 0
 
 # al::GameFrameworkOunce::createControllerMgr (main+0x73b300) reaches sub_71008725E0 through main+0x73be90: it makes
 # a transfer memory and talks to IHidServer itself (nn::hid::server::CreateHidServerProxy), past the nn::hid calls the
 # host takes over, and aborts on a failed Result. The host serves no "hid" IPC service, so the call reports success.
 site hidproxy main 73bea0 9404d9d0 2a1f03e0   # bl sub_71008725E0 -> mov w0, wzr
+
+# Real-time frame step (runtime/frame_rate.c writes the patch page: +4 seconds, +8 seconds * 60). The game's adaptive
+# present-interval controller (main+0x1eace8) publishes the frame rate as an integer at +0x50 of its object, and every
+# manager that needs the frame step converts it back: interval = 60 / rate and seconds = 1 / rate. Those conversions
+# read the patch page instead, as the set realtime does for TotK (patches-v143.txt): the measured display time decides
+# the step, the pacer decides the frame rate. Each site's scratch register is dead there (the next write of it is the
+# call's argument or a reload).
+site realtime main 1bc830 5e21d800 @page:x0        # scvtf s0, s0 -> adrp x0, page
+site realtime main 1bc834 1e201820 bd400800        # fdiv s0, s1, s0 -> ldr s0, [x0, #8]
+site realtime main 2d9fc4 5e21d800 @page:x9        # f_70002d9f60: scvtf s0, s0 -> adrp x9, page
+site realtime main 2d9fc8 1e201820 bd400920        # f_70002d9f60: fdiv s0, s1, s0 -> ldr s0, [x9, #8]
+# The frame-step manager also builds the seconds it hands its listeners (1/rate). That path is behind a singleton
+# pointer that this build never sets, but the replacement keeps the site consistent if it ever runs.
+site realtime main 2da110 bd405120 @page:x9        # ldr s0, [x9, #0x50] -> adrp x9, page
+site realtime main 2da114 52a84e09 bd400520        # mov w9, #60.0 -> ldr s0, [x9, #4]
+site realtime main 2da118 1e270121 d503201f        # fmov s1, w9 -> nop
+site realtime main 2da11c 5e21d800 d503201f        # scvtf s0, s0 -> nop
+site realtime main 2da120 1e201820 d503201f        # fdiv s0, s1, s0 -> nop
+site realtime main 2da124 1e211800 d503201f        # fdiv s0, s0, s1 -> nop
+site realtime main 34e998 5e21d800 @page:x0        # f_700034e930: scvtf s0, s0 -> adrp x0, page
+site realtime main 34e99c 1e201820 bd400800        # f_700034e930: fdiv s0, s1, s0 -> ldr s0, [x0, #8]
+site realtime main 34ec18 5e21d800 @page:x8        # f_700034e930: scvtf s0, s0 -> adrp x8, page
+site realtime main 34ec1c 1e201828 bd400908        # f_700034e930: fdiv s8, s1, s0 -> ldr s8, [x8, #8]
+site realtime main 34ec64 5e21d800 @page:x8        # f_700034ec30: scvtf s0, s0 -> adrp x8, page
+site realtime main 34ec68 1e201860 bd400900        # f_700034ec30: fdiv s0, s3, s0 -> ldr s0, [x8, #8]
+site realtime main 69fc5c 5e21d800 @page:x0        # f_700069fc20: scvtf s0, s0 -> adrp x0, page
+site realtime main 69fc60 1e201820 bd400800        # f_700069fc20: fdiv s0, s1, s0 -> ldr s0, [x0, #8]

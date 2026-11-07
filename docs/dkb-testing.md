@@ -45,6 +45,8 @@ Useful settings, as environment variables (`set NAME=value` in the same Command 
 | `TOTK_GPU=null` | Run without a picture (no Vulkan). Useful to tell CPU and OS bugs from graphics bugs. |
 | `TOTK_XLATE_PROCS=<n>` | Shader translator processes at run time (default 2). Lower it if RAM runs out. |
 | `TOTK_TRACE=perf` | Log the frame time, what holds frames back and the GPU time every 60 frames. For stalls and low frame rates. |
+| `TOTK_FPS_LIMIT=<hz>` | Frame limit: 30 to 360, or `display` for the monitor's refresh rate (default 60). Without the real-time step below the pacer still follows the game's own present interval; above 60 needs `TOTK_REALTIME=1`. |
+| `TOTK_REALTIME=1` | Run the frame pacer at `TOTK_FPS_LIMIT` instead of the game's adaptive 30/60 Hz present interval, and take the game's frame-step caches from the measured display time (the `realtime` patch set). Off by default until it has had a play test; turn it off with `TOTK_REALTIME=0`. |
 | `TOTK_PERF_SLOW_GPU_MS=<ms>` | With `TOTK_TRACE=perf`, a replay part that runs this long on the GPU (default 100) gets a line with its draw and dispatch counts and the NVN 2 names of its stages, a second line with the arguments of its indirect draws as read back afterwards, and a third saying whether a shader in that part wrote the largest one's arguments, and which. |
 | `TOTK_FIX_INDIRECT_RESET=0` | Draws the terrain's indirect-record reset program as a shader instead of the host doing its stores (#48). The shader's stores are lost, so the records keep zero or stale contents; for comparisons only. |
 | `TOTK_EXPERIMENTAL_GEOMETRY=1` | Replays draws with an ordinary geometry stage through it (#52). Off by default; other geometry draws are rejected once in the log. |
@@ -64,6 +66,21 @@ To edit every F1-menu setting before starting the game, double-click `Launch DKB
 and starts the game. Settings marked “After restart” take effect on that start; settings marked unsupported are not
 implemented by that game build. Environment overrides for changed settings are removed from the child game process.
 `--exe PATH` selects another build.
+
+## Frame rate
+
+The game's adaptive present-interval controller asks the display for every second vsync in heavy scenes, and the host
+pacer then holds each frame for two 60 Hz ticks, so those scenes run at a locked 30 fps. `TOTK_REALTIME=1` (the
+`realtime` patch set in `recomp\patches-dkb100.txt`) is the DKB port of TotK Recomp's real-time step: the pacer keeps
+`TOTK_FPS_LIMIT` instead of the game's interval, and the frame-step caches the game builds from the controller's integer
+rate (`main+0x1bc7cc`, `+0x2d9f60`, `+0x34e930`, `+0x34ec30`, `+0x69fc20`) read the measured display interval from the
+patch page. The set is off by default until it has had a play test; slow scenes are then CPU bound, and the locked
+30 fps path is the safe default.
+
+On the 70 s face route the set keeps the same scene at the end and raises the 1 % low from about 29 to 44 fps. A
+scripted walk covered the same ground per second at 30, 45, 50 and 60 fps, so game speed still follows wall time; the
+frame boundaries do differ, so a recorded route does not end in exactly the baseline's spot after two minutes (this
+route is chaotic), which is why the set stays behind its switch.
 
 ## Preparing shaders offline
 
