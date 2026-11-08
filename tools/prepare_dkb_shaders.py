@@ -134,6 +134,39 @@ def code_hash(program, answer=None):
     return h.digest()
 
 
+def fmz_code_hash(digest):
+    """The code hash gfx_shader.c records for a stage translated with the FMZ rule: sha256("FMZ1" + plain)."""
+    return sha(b'FMZ1', digest)
+
+
+def fmz_stage_set(mode, log):
+    """Stages the prepare run translates with the FMZ rule, mirroring gfx_shader.c's selection.
+
+    ``auto`` follows the runtime: no TOTK_FMZ_STAGES value means all vertex stages, off means none, and all means
+    every stage. A stage name, sel: list or hash: list selects individual programs by their native NVN 2 origin,
+    which the lowered records do not carry, so an offline check cannot reproduce it.
+    """
+    if mode == 'auto':
+        value = os.environ.get('DKB_FMZ_STAGES')
+        if value is None:
+            value = os.environ.get('TOTK_FMZ_STAGES')
+        value = (value or '').strip()
+        if not value:
+            return {GFX_STAGE_VS}
+        low = value.lower()
+        if low == 'off':
+            return set()
+        if low == 'all':
+            return {0, 1, 2, 3, 4, 5}
+        sys.exit('the FMZ list in TOTK_FMZ_STAGES selects individual stages; pass --fmz vertex or --fmz off to '
+                 'check the prepared cache offline, or play-test the narrowed list')
+    if mode == 'off':
+        return set()
+    if mode == 'vertex':
+        return {GFX_STAGE_VS}
+    return {0, 1, 2, 3, 4, 5}
+
+
 def masked_answers(answer):
     """gfx_shader.c mask_answers: slots/attrs/fouts outside the mask are zero; local and shared always survive, and
     depth_minus_w is not copied at all (it is not in the input id)."""
@@ -589,8 +622,9 @@ def find_spirv_val(explicit):
 
 # ---- verification
 
-def verify(work, programs, answers, effective, spirv_val_tool, strict_spirv=False, reference=None):
+def verify(work, programs, answers, effective, spirv_val_tool, strict_spirv=False, reference=None, fmz_stages=None):
     cache = work / 'shader-cache'
+    fmz_stages = fmz_stages or set()
     packed = cache / 'shader-cache.pack'
     if packed.is_file():
         return {'error': f'{packed} is packed; verify before running tools/pack_shader_cache.py'}
@@ -619,8 +653,9 @@ def verify(work, programs, answers, effective, spirv_val_tool, strict_spirv=Fals
         if not matches:
             problems.append(f'{program["hash"].hex()[:16]}: no answer record')
             continue
-        calc_hash = code_hash(program, matches[0])
-        if program['stage'] != GFX_STAGE_GS and calc_hash != program['hash']:
+        plain_hash = code_hash(program, matches[0])
+        calc_hash = fmz_code_hash(plain_hash) if program['stage'] in fmz_stages else plain_hash
+        if program['stage'] != GFX_STAGE_GS and calc_hash != program['hash'] and plain_hash != program['hash']:
             problems.append(f'{program["hash"].hex()[:16]}: stored code hash does not match the program bytes')
         for answer in matches:
             answer = dict(answer)
@@ -776,6 +811,8 @@ def main():
                     help='use the existing workspace, skip seeding/translation/verification (for --run-seconds)')
     ap.add_argument('--no-verify', action='store_true', help='skip verification (for a packed workspace or --run-only)')
     ap.add_argument('--pack', action='store_true', help='fold the verified cache with tools/pack_shader_cache.py')
+    ap.add_argument('--fmz', choices=('auto', 'off', 'vertex', 'all'), default='auto',
+                    help='FMZ stages the translation used (default: auto, the runtime default of all vertex stages)')
     ap.add_argument('--spirv-val', help='spirv-val executable (default: PATH or the Vulkan SDK)')
     ap.add_argument('--reference', type=Path,
                     help='a runtime shader-cache directory (loose or packed) to compare prepared entries against')
@@ -894,6 +931,7 @@ def main():
         log = logpath.read_text(encoding='utf-8', errors='replace') if logpath.is_file() else ''
 
     excluded = max(0, all_programs - len(programs))
+    fmz = fmz_stage_set(args.fmz, log)
     manifest = read_manifest(work)
     if manifest and manifest.get('effective_id'):
         effective = bytes.fromhex(manifest['effective_id'])
@@ -908,7 +946,7 @@ def main():
     else:
         tool = find_spirv_val(args.spirv_val)
         report = verify(work, programs, answers, effective, tool, args.strict_spirv,
-                        args.reference.resolve() if args.reference else None)
+                        args.reference.resolve() if args.reference else None, fmz)
         report['work'] = str(work)
         report['spirv_val'] = str(tool) if tool else None
         report['translator'] = str(args.translator.resolve())

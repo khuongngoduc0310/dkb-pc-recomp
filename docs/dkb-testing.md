@@ -147,6 +147,11 @@ recommended one) and `play-full.cmd` (3,039 recorded, 291 unverified).
 starts `dkb.exe`; this is the recommended way to play a prepared cache without changing the build's own cache.
 `--run-only` uses an existing workspace without seeding or translating again; `--no-verify` skips only the verifier.
 
+The verifier follows the runtime's FMZ default (all vertex stages): an FMZ translation's cache key is
+`sha256("FMZ1" + the plain code hash)`. `--fmz off`, `--fmz vertex` or `--fmz all` overrides it. A narrowed
+`TOTK_FMZ_STAGES` list selects individual stages by their native NVN 2 names, which the lowered records do not carry,
+so that case still needs a play test.
+
 To repeat the shader-translation comparison with fresh shader/pipeline caches per run:
 
 ```text

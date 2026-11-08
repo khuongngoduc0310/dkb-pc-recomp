@@ -3,6 +3,15 @@
 Milestones of DKB Recomp, newest first. The plan they follow is [bananza-plan.md](bananza-plan.md); open work is in
 the [roadmap issue](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/10).
 
+## 8 November 2026
+
+- **The offline cache now covers the FMZ translator identity.** Preparing the 3,293 records from the realtime
+  validation capture translated 2,157 unique variants (1,136 vertex, 983 fragment, 36 compute) in 17.7 s and warmed
+  their pipelines in 5.0 s. `spirv-val` accepted all of them, and the packed cache is 250 MiB (8,628 files). The
+  offline verifier learned the FMZ key rule (`sha256("FMZ1" + the plain code hash)`) so the vertex entries are
+  checked under the key the runtime asks for; `--fmz off`, `--fmz vertex` and `--fmz all` cover the whole-stage
+  settings, while a narrowed stage list still needs a play test.
+
 ## 7 November 2026
 
 - **The banana-punch device lost is a separate #75-class driver compiler bug.** The Aftermath dump names the
@@ -11,8 +20,8 @@ the [roadmap issue](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/10).
   `VkDeviceFaultVendorBinaryHeaderKHR`'s 56-byte header has to be stripped before the Aftermath decoder.
   FMZ on all vertex stages fixes it; the warm run held 60 fps and passed the punch. The realtime build has the
   `0020-forced-fmz` translator patch and enables FMZ on vertex stages by default. Hand-played validation: the
-  punch and the end-of-tutorial cutscene now pass on that build. The offline shader cache regeneration is the
-  remaining performance step.
+  punch and the end-of-tutorial cutscene now pass on that build. The offline shader cache was regenerated for the
+  FMZ identity (8 November).
 
 ## 6 November 2026
 

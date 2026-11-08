@@ -272,8 +272,15 @@ def main():
     if manifest['pack'] != str(cache / 'shader-cache.pack') or manifest['pack_size'] != pack_path.stat().st_size:
         raise AssertionError('record_pack did not record the pack after a verify-only pack')
 
+    # 6. FMZ cache-key rules: the runtime re-hashes "FMZ1" + the plain code hash before the key lookup.
+    if tool.fmz_code_hash(digest) != hashlib.sha256(b'FMZ1' + digest).digest():
+        raise AssertionError('fmz_code_hash does not match the runtime rule')
+    if (tool.fmz_stage_set('off', '') != set() or tool.fmz_stage_set('vertex', '') != {tool.GFX_STAGE_VS} or
+            tool.fmz_stage_set('all', '') != {0, 1, 2, 3, 4, 5}):
+        raise AssertionError('fmz_stage_set did not map the whole-stage modes')
+
     print('dkb prepare: passed (native lowering, exact match, unmatched report, no-dump, verified-only, GS code match, '
-          'merge/dump/pack, manifest pack, torn tail)')
+          'merge/dump/pack, manifest pack, torn tail, FMZ key)')
     return 0
 
 
