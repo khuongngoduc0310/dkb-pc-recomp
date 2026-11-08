@@ -35,27 +35,45 @@ class IniSettingsTest(unittest.TestCase):
 
     def test_missing_section_is_added_atomically_with_bom(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'totk.ini'
+            path = Path(tmp) / 'dkb.ini'
             path.write_bytes(b'\xef\xbb\xbf[display]\r\nfullscreen = 1\r\n')
             launch_dkb.write_ini_updates(path, {'LOD_DISTANCE': 'half'}, {'LOD_DISTANCE': 'performance'})
             self.assertEqual(path.read_bytes(), b'\xef\xbb\xbf[display]\r\nfullscreen = 1\r\n\r\n'
                              b'[performance]\r\nlod_distance = half\r\n')
-            self.assertFalse(path.with_name('totk.ini.tmp').exists())
+            self.assertFalse(path.with_name('dkb.ini.tmp').exists())
 
     def test_missing_ini_uses_example_and_preserves_its_comments(self):
         with tempfile.TemporaryDirectory() as tmp:
             example = Path(tmp) / 'example.ini'
             example.write_text('[performance]\n# lod_distance = default\n# keep\n', encoding='utf-8')
-            path = Path(tmp) / 'totk.ini'
+            path = Path(tmp) / 'dkb.ini'
             launch_dkb.write_ini_updates(path, {'LOD_DISTANCE': 'quarter'}, {'LOD_DISTANCE': 'performance'}, example)
             self.assertEqual(path.read_text(encoding='utf-8'),
                              '[performance]\n# lod_distance = default\nlod_distance = quarter\n# keep\n')
 
     def test_no_change_does_not_create_ini(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'totk.ini'
+            path = Path(tmp) / 'dkb.ini'
             launch_dkb.write_ini_updates(path, {}, {})
             self.assertFalse(path.exists())
+
+
+class SettingsFilesTest(unittest.TestCase):
+    def test_settings_paths_are_both_files_beside_the_exe_legacy_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / 'dkb.exe'
+            self.assertEqual(launch_dkb.settings_paths(exe),
+                             (Path(tmp) / 'totk.ini', Path(tmp) / 'dkb.ini'))
+
+    def test_example_prefers_dkb_example_then_totk_example(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / 'dkb.exe'
+            totk_example = Path(tmp) / 'totk.ini.example'
+            totk_example.write_text('[display]\n', encoding='utf-8')
+            self.assertEqual(launch_dkb.example_path(exe), totk_example)
+            dkb_example = Path(tmp) / 'dkb.ini.example'
+            dkb_example.write_text('[display]\n', encoding='utf-8')
+            self.assertEqual(launch_dkb.example_path(exe), dkb_example)
 
 
 class SchemaAndLaunchTest(unittest.TestCase):
@@ -86,13 +104,37 @@ class SchemaAndLaunchTest(unittest.TestCase):
             self.assertEqual(kwargs['cwd'], str(exe.parent))
             self.assertEqual(kwargs['env'], {'TOTK_PROFILE_DIR': 'profile'})
             self.assertEqual(child, popen.return_value)
-            self.assertEqual((Path(tmp) / 'totk.ini').read_text(encoding='utf-8'),
-                             '[performance]\nlod_distance = half\n')
+            for name in ('dkb.ini', 'totk.ini'):
+                self.assertEqual((Path(tmp) / name).read_text(encoding='utf-8'),
+                                 '[performance]\nlod_distance = half\n')
+
+    def test_start_updates_an_existing_dkb_ini_and_keeps_its_comments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / 'dkb.exe'
+            exe.write_bytes(b'fake executable')
+            (Path(tmp) / 'dkb.ini').write_text('[display]\n# keep\nfullscreen = 1\noutput_res = 2880x1620\n',
+                                               encoding='utf-8')
+            with patch.object(launch_dkb.subprocess, 'Popen'):
+                launch_dkb.start_game(exe, {'OUTPUT_RES': '1920x1080'}, {'OUTPUT_RES': 'display'})
+            self.assertEqual((Path(tmp) / 'dkb.ini').read_text(encoding='utf-8'),
+                             '[display]\n# keep\nfullscreen = 1\noutput_res = 1920x1080\n')
+
+    def test_start_seeds_a_missing_dkb_ini_from_the_updated_totk_ini(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / 'dkb.exe'
+            exe.write_bytes(b'fake executable')
+            (Path(tmp) / 'totk.ini').write_text('[display]\n# output_res = 1920x1080\noutput_res = 2880x1620\n',
+                                                encoding='utf-8')
+            with patch.object(launch_dkb.subprocess, 'Popen'):
+                launch_dkb.start_game(exe, {'OUTPUT_RES': '1920x1080'}, {'OUTPUT_RES': 'display'})
+            expected = '[display]\n# output_res = 1920x1080\noutput_res = 1920x1080\n'
+            self.assertEqual((Path(tmp) / 'totk.ini').read_text(encoding='utf-8'), expected)
+            self.assertEqual((Path(tmp) / 'dkb.ini').read_text(encoding='utf-8'), expected)
 
     def test_built_bananza_schema_covers_f1_tabs_and_bindings(self):
-        exe = ROOT / 'build' / 'dkb100' / 'dkb.exe'
+        exe = launch_dkb.DEFAULT_EXE
         if not exe.is_file():
-            self.skipTest('build/dkb100/dkb.exe is not present')
+            self.skipTest(f'{exe} is not present')
         schema = launch_dkb.load_schema(exe)
         rows = {row['key']: row for row in schema['settings']}
         menu_source = (ROOT / 'runtime' / 'ui' / 'menu.cpp').read_text(encoding='utf-8')
@@ -142,7 +184,7 @@ class SchemaAndLaunchTest(unittest.TestCase):
             launch_dkb._validate_setting({'key': 'GPU_INDEX'}, '8', schema)
 
     def test_default_input_record_path_matches_the_log_folder(self):
-        exe = ROOT / 'build' / 'dkb100' / 'dkb.exe'
+        exe = launch_dkb.DEFAULT_EXE
         self.assertEqual(launch_dkb.persisted_setting_value('INPUT_RECORD', '@default', exe),
                          str(exe.resolve().parent / 'logs' / 'input-record.txt'))
 

@@ -1,11 +1,12 @@
 """Edit all F1 settings before starting dkb.exe.
 
     .venv\\Scripts\\python.exe tools\\launch_dkb.py
-    .venv\\Scripts\\python.exe tools\\launch_dkb.py --exe build\\dkb100\\dkb.exe
+    .venv\\Scripts\\python.exe tools\\launch_dkb.py --exe build\\fps-realtime\\dkb.exe
 
-The selected values are written to the totk.ini beside the executable. Settings whose
-environment overrides are changed in the launcher have those overrides removed only from
-the game process it starts.
+The selected values are written to the dkb.ini beside the executable, and to totk.ini as
+well: a Bananza build reads dkb.ini, while TotK Recomp and the older Bananza builds still
+read totk.ini. Settings whose environment overrides are changed in the launcher have those
+overrides removed only from the game process it starts.
 """
 import argparse
 import json
@@ -17,8 +18,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_EXE = ROOT / 'build' / 'dkb100' / 'dkb.exe'
+DEFAULT_EXE = ROOT / 'build' / 'fps-realtime' / 'dkb.exe'
 EXAMPLE_INI = ROOT / 'totk.ini.example'
+SETTINGS_INI = 'dkb.ini'
+LEGACY_INI = 'totk.ini'
 COLOR_PRESETS = {
     'default': ('0', '100', '100', '1'),
     'vivid': ('0', '115', '135', '0.95'),
@@ -28,6 +31,7 @@ COLOR_KEYS = ('COLOR_BRIGHTNESS', 'COLOR_CONTRAST', 'COLOR_SATURATION', 'COLOR_G
 SPECIAL_LABELS = {
     'LOD': 'LOD', 'GPU': 'GPU', 'FPS': 'FPS', 'FOV': 'FOV', 'ASTC': 'ASTC', 'GPL': 'GPL',
     'VK': 'Vulkan', 'A2C': 'A2C', 'XLATE': 'Translator', 'NVN': 'NVN',
+    'OUTPUT': 'Render', 'RES': 'Resolution',
 }
 
 
@@ -155,11 +159,36 @@ def launch_environment(environment=None, clear_keys=()):
     return env
 
 
+def settings_paths(exe):
+    """The settings files beside exe: (totk.ini, dkb.ini), the order start_game writes them.
+
+    totk.ini comes first: TotK Recomp and the older Bananza builds read it, and a Bananza
+    build copies an existing totk.ini to dkb.ini when dkb.ini is missing. Writing it first
+    lets that copy carry the values the launcher wrote before dkb.ini existed.
+    """
+    folder = Path(exe).resolve().parent
+    return folder / LEGACY_INI, folder / SETTINGS_INI
+
+
+def example_path(exe):
+    """The ini example beside exe, else the repository's: its comments document the settings."""
+    folder = Path(exe).resolve().parent
+    for name in (SETTINGS_INI, LEGACY_INI):
+        candidate = folder / (name + '.example')
+        if candidate.is_file():
+            return candidate
+    return EXAMPLE_INI
+
+
 def start_game(exe, updates, sections, environment=None, example=None):
     exe = Path(exe).resolve()
     if not exe.is_file():
         raise FileNotFoundError(exe)
-    write_ini_updates(exe.with_name('totk.ini'), updates, sections, example)
+    totk_ini, dkb_ini = settings_paths(exe)
+    write_ini_updates(totk_ini, updates, sections, example)
+    # The game makes the same copy itself on a first run with no dkb.ini; doing it here as
+    # well means a build that has not run yet starts from the values just written.
+    write_ini_updates(dkb_ini, updates, sections, totk_ini if totk_ini.is_file() else example)
     return subprocess.Popen([str(exe)], cwd=str(exe.parent), env=launch_environment(environment, updates.keys()))
 
 
@@ -216,6 +245,7 @@ def _choice_label(value, key):
         'en-US': 'English', 'immediate': 'Immediate', 'fifo': 'VSync', 'mailbox': 'Mailbox',
         'strict': 'Strict', 'any': 'Any', 'fullscreen': 'Fullscreen', 'fsr': 'FSR', 'bilinear': 'Bilinear',
         'docked': 'Docked', 'handheld': 'Handheld', 'vivid': 'Vivid', 'clarity': 'Clarity', 'custom': 'Custom',
+        'edges': 'Screen edges', 'centered': 'Centered',
     }
     if value in labels:
         return labels[value]
@@ -323,9 +353,7 @@ class App:
         self.tk, self.ttk, self.root = tk, ttk, root
         self.exe = Path(exe).resolve()
         self.schema = load_schema(self.exe)
-        self.example = self.exe.with_name('totk.ini.example')
-        if not self.example.is_file():
-            self.example = EXAMPLE_INI
+        self.example = example_path(self.exe)
         self.setting_fields = {}
         self.binding_fields = {}
         self._color_sync = False
@@ -345,7 +373,7 @@ class App:
 
         self.notebook = ttk.Notebook(root)
         self.notebook.grid(row=1, column=0, sticky='nsew', padx=10)
-        self.notice = ttk.Label(root, text='Unsupported options are shown with a warning; changes remain in totk.ini.',
+        self.notice = ttk.Label(root, text='Unsupported options are shown with a warning; their values are still saved.',
                                 foreground='#8a5a00', padding=(10, 5))
         self.notice.grid(row=2, column=0, sticky='w')
         bottom = ttk.Frame(root, padding=10)
@@ -378,9 +406,7 @@ class App:
         self.exe = Path(chosen).resolve()
         self.exe_var.set(str(self.exe))
         self.schema = schema
-        self.example = self.exe.with_name('totk.ini.example')
-        if not self.example.is_file():
-            self.example = EXAMPLE_INI
+        self.example = example_path(self.exe)
         self.build_tabs()
 
     def _field_row(self, parent, spec, binding=False):
@@ -532,14 +558,12 @@ class App:
         try:
             exe = Path(self.exe_var.get().strip()).resolve()
             updates, sections = self._collect_updates()
-            example = exe.with_name('totk.ini.example')
-            if not example.is_file():
-                example = EXAMPLE_INI
-            process = start_game(exe, updates, sections, os.environ, example)
+            process = start_game(exe, updates, sections, os.environ, example_path(exe))
         except Exception as error:
             messagebox.showerror('DKB Settings Launcher', str(error))
             return
-        self.status.set(f'Launched (PID {process.pid}). Settings saved to {exe.with_name("totk.ini")}')
+        totk_ini, dkb_ini = settings_paths(exe)
+        self.status.set(f'Launched (PID {process.pid}). Settings saved to {dkb_ini} and {totk_ini}')
 
 
 def main(argv=None):
