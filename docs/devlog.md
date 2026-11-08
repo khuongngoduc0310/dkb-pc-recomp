@@ -3,6 +3,17 @@
 Milestones of DKB Recomp, newest first. The plan they follow is [bananza-plan.md](bananza-plan.md); open work is in
 the [roadmap issue](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/10).
 
+## 7 November 2026
+
+- **The banana-punch device lost is a separate #75-class driver compiler bug.** The Aftermath dump names the
+  vertex stage `199a73c7208e0682` (hash `0x11b39701e028d61c`, 12,544-byte compiled shader, fault PC `0x2140`),
+  paired with fragment `88225f9cda98faed`. All eleven diagnostic vendor dumps decode to the same shader; the
+  `VkDeviceFaultVendorBinaryHeaderKHR`'s 56-byte header has to be stripped before the Aftermath decoder.
+  FMZ on all vertex stages fixes it; the warm run held 60 fps and passed the punch. The realtime build has the
+  `0020-forced-fmz` translator patch and enables FMZ on vertex stages by default. Hand-played validation: the
+  punch and the end-of-tutorial cutscene now pass on that build. The offline shader cache regeneration is the
+  remaining performance step.
+
 ## 6 November 2026
 
 - **The DKB shader cache can be prepared offline.** `dkb.exe --seed-dkb-shaders` turns the lowered programs and answers

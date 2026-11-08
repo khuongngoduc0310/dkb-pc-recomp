@@ -86,6 +86,11 @@ static int fail(const char *why, const char *detail) { (void)detail; error = why
 /* The hash provider keeps the production signature for older-source compatibility. */
 static void paths(void) {}
 static int use_find(const uint8_t *hash, UseMask *mask) { (void)hash; (void)mask; return 0; }
+int gfx_shader_fmz_listed(const uint8_t *origin_code) { (void)origin_code; return 0; }
+static int fmz_selected(const uint8_t *code, int stage) { (void)code; (void)stage; return 0; }
+static int fmz_hash_listed(const uint8_t *hash) { (void)hash; return 0; }
+_Thread_local int gfx_shader_fmz_pair;
+void rt_sha256(const void *data, size_t size, uint8_t out[32]) { (void)data; (void)size; memset(out, 0, 32); }
 static void build_key(const uint8_t *hash, const GfxShaderAnswers *answers, const UseMask *mask,
                       uint8_t *key, uint8_t *iid) { (void)hash; (void)answers; (void)mask; (void)key; (void)iid; }
 // Cache identity and memory-cache misses are adapters; the private loader,
@@ -147,13 +152,13 @@ int main(void) {
     char request[4096];
     memcpy(full+NVN2_C0_LAYOUT,"DKC1",4);
     uint32_t dimensions[3]={1,1,1}; memcpy(full+0x748,dimensions,sizeof dimensions);
-    size_t request_size=build_request(request,"original","cs","original.bin",NULL,0,NULL,full);
+    size_t request_size=build_request(request,"original","cs","original.bin",NULL,0,NULL,full,0);
     CHECK(request_size==strlen(request) && json_int(request,request+request_size,"storage_candidates_version",-1)==1);
     CHECK(json_int(request,request+request_size,"c0_version",-1)==2 && json_key(request,request+request_size,"c0_roots"));
-    build_request(request,"original","ps","original.bin",NULL,0,NULL,full);
+    build_request(request,"original","ps","original.bin",NULL,0,NULL,full,0);
     CHECK(!json_key(request,request+strlen(request),"storage_candidates_version"));
     memset(full+NVN2_C0_LAYOUT,0,4);
-    build_request(request,"original","cs","original.bin",NULL,0,NULL,full);
+    build_request(request,"original","cs","original.bin",NULL,0,NULL,full,0);
     CHECK(!json_key(request,request+strlen(request),"storage_candidates_version"));
 #ifdef _WIN32
     VirtualFree(mapping, 0, MEM_RELEASE);

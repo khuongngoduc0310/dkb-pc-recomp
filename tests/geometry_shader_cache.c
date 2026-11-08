@@ -246,7 +246,7 @@ int main(int argc, char **argv) {
             Req r={0};int recreated=req_init(&r,in.stage,in.control,in.code,in.length,in.c1,&in.a);
             printf(",\"recreated\":%s",recreated?"true":"false");
             if(recreated) {
-                char request[32768];build_request(request,"original",r.stage_name,"original Maxwell.code",r.c1,r.c1_len,&in.a,in.control);
+                char request[32768];build_request(request,"original",r.stage_name,"original Maxwell.code",r.c1,r.c1_len,&in.a,in.control,0);
                 printf(",\"request\":%s,\"iid\":\"",request);hex_bytes(r.iid,32);printf("\"");
             }
         }puts("}");free(in.buf);return 0;
@@ -314,7 +314,7 @@ int main(int argc, char **argv) {
             }
         }
         char request[32768];
-        build_request(request,"original",req.stage_name,"original Maxwell.code",req.c1,req.c1_len,&a,control);
+        build_request(request,"original",req.stage_name,"original Maxwell.code",req.c1,req.c1_len,&a,control,0);
         printf("{\"accepted\":true,\"request\":%s,\"hash\":\"",request);hex_bytes(req.code_hash,32);
         printf("\",\"key\":\"");hex_bytes(req.key,32);printf("\",\"iid\":\"");hex_bytes(req.iid,32);
         printf("\",\"final\":%d}\n",req.final);

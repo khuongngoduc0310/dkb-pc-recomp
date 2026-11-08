@@ -48,6 +48,8 @@ int cfg_bool(const char *name) { return !strcmp(name,"TOTK_NATIVE_GS")?0:!strcmp
 static int c0_on(void) { return fix_c0; }
 static void warn_once(int key,const char *format,...) { (void)key;(void)format;warnings++; }
 uint64_t nvn2_origin(const uint8_t *code) { return code==native_code?17:0; }
+int gfx_shader_fmz_listed(const uint8_t *code) { (void)code; return 0; }
+_Thread_local int gfx_shader_fmz_pair;
 int vk_pipeline_async_on(void) { return async_on; }
 uint32_t gfx_shader_slot_mask(const GfxShader *s) {(void)s;return last_answers.geometry_input==GFX_GEOMETRY_POINTS?0:1;}
 const GfxShader *gfx_shader_get(int stage,const uint8_t *ctl,const uint8_t *code,uint64_t len,

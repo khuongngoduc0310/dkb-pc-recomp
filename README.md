@@ -24,12 +24,18 @@ As far as we know, no other static recompilation of a Switch 2 game is public.
 
 **Not playable yet.** The game boots, goes through the title screen into the tutorial cave, renders the 3D scene and
 answers the controller: you can walk and punch through the mining tunnel, with the guide movies playing, and one
-hand-played run reached the Ingot Isle Cave-In section. It still
-can crash (on NVIDIA two light quads are skipped to avoid a GPU fault,
-[#9](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/9)), and
-many effects are missing.
+hand-played run reached the Ingot Isle Cave-In section. The banana-punch device lost on NVIDIA is fixed by forcing FMZ
+on vertex shaders (the `0020-forced-fmz` translator patch), which the realtime build enables by default. The
+end-of-tutorial cutscene device lost ([#75](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/75)) is fixed
+by the same workaround. Two light quads are still skipped on NVIDIA
+to avoid a different GPU fault ([#9](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/9)), and many effects are
+missing.
 There is no release. An installer builds the game from your own dump: [docs/installer.md](docs/installer.md).
 Progress, day by day: [docs/devlog.md](docs/devlog.md).
+
+The FMZ workaround is on by default. `TOTK_FMZ_STAGES=off` disables it; a 16-digit stage name, `sel:` list or `hash:`
+list narrows it. It is an NVIDIA driver-compiler workaround, not a game-code fix; [docs/dkb-testing.md](docs/dkb-testing.md)
+describes the setting.
 
 | Phase | | State |
 | --- | --- | --- |
@@ -38,7 +44,7 @@ Progress, day by day: [docs/devlog.md](docs/devlog.md).
 | F2 NVN 2 | ✅ | 700 NVN 2 entry points answered; the game loop runs. 51 new command buffer calls (mesh shaders, VRS, DLSS, push constants…) are accepted but not recorded yet. |
 | F3 Shaders | ✅ | All 4,820 Ampere shader stages of the first 3D scene go through Eglantine's Ampere-to-Maxwell lowering and TotK Recomp's translator to SPIR-V. |
 | F4 Vulkan | ✅ | The title screen and the tutorial's 3D scene render. |
-| F5 Playable | 🚧 | Controller, guide movies (VP9) and push constants work. Open: a GPU fault some minutes in on NVIDIA, the black destructible terrain (its geometry stage, [#45](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/45)), some textures, performance outside the tutorial. |
+| F5 Playable | 🚧 | Controller, guide movies (VP9) and push constants work. The banana-punch device lost and the end-of-tutorial cutscene GPU fault ([#75](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/75)) are fixed by the FMZ workaround. Open: the black destructible terrain (its geometry stage, [#45](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/45)), some textures, performance outside the tutorial. |
 
 The plan, phase by phase: [docs/bananza-plan.md](docs/bananza-plan.md). What is open right now:
 [Roadmap to playable](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/10).
@@ -116,12 +122,13 @@ The toolchain is TotK Recomp's ([docs/building.md](docs/building.md)): MSYS2 UCR
 .venv\Scripts\python tools\build_game.py --version dkb100 --expected tools\data\expected-dkb100.json --exefs <exefs> --romfs build\extracted\dkb100\romfs
 ```
 
-Everything the build writes stays under `build\` and `generated\`, which git ignores. The game uses about 13 GB of
+Everything the build writes stays under `build\` and `generated\`, which git ignores. The game uses about 14 GB of
 RAM, so 16 GB is the minimum for now. Running and testing: [docs/dkb-testing.md](docs/dkb-testing.md).
 
 ## FAQ
 
-**Can I play it?** Not yet. It reaches the tutorial and crashes often. Follow the
+**Can I play it?** Not yet. It reaches the tutorial and the banana punch and the end-of-tutorial cutscene now pass
+with the NVIDIA FMZ workaround. Follow the
 [roadmap](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/10) or the [devlog](docs/devlog.md).
 
 **Will there be a download?** No. The executable is made from the game's own code, so it cannot be shared. Everyone

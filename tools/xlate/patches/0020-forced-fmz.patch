@@ -1,0 +1,56 @@
+--- a/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
++++ b/src/Ryujinx.Graphics.Shader/IGpuAccessor.cs
+@@ -399,6 +399,15 @@ namespace Ryujinx.Graphics.Shader
+             return true;
+         }
+ 
++        /// <summary>
++        /// Whether every FP32 multiply of this shader follows Maxwell's FMZ rule (0 x anything = 0).
++        /// </summary>
++        /// <returns>True to apply the rule, false for IEEE multiplies (the default)</returns>
++        bool QueryForceFmz()
++        {
++            return false;
++        }
++
+         /// <summary>
+         /// Queries whether the host supports depth clip control.
+         /// </summary>
+--- a/src/Ryujinx.Graphics.Shader/Translation/EmitterContextInsts.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/EmitterContextInsts.cs
+@@ -346,9 +346,24 @@ namespace Ryujinx.Graphics.Shader.Translation
+             return context.Add(fpType | Instruction.Floor, Local(), a);
+         }
+ 
++        // The host asks for Maxwell's FMZ rule (0 x anything = 0, infinities and NaN included) on every FP32
++        // multiply of this shader. Only shaders the runtime names get it (DKB_FMZ_STAGES), so the cost stays with them.
++        private static bool ForceFmz(EmitterContext context, Instruction fpType)
++        {
++            return fpType == Instruction.FP32 && context.TranslatorContext != null && context.TranslatorContext.GpuAccessor.QueryForceFmz();
++        }
++
++        private static Operand FmzSelect(EmitterContext context, Operand a, Operand b, Operand zeroResult, Operand result)
++        {
++            Operand zero = ConstF(0f);
++            Operand r = context.ConditionalSelect(context.FPCompareEqual(b, zero), zeroResult, result);
++            return context.ConditionalSelect(context.FPCompareEqual(a, zero), zeroResult, r);
++        }
++
+         public static Operand FPFusedMultiplyAdd(this EmitterContext context, Operand a, Operand b, Operand c, Instruction fpType = Instruction.FP32)
+         {
+-            return context.Add(fpType | Instruction.FusedMultiplyAdd, Local(), a, b, c);
++            Operand fma = context.Add(fpType | Instruction.FusedMultiplyAdd, Local(), a, b, c);
++            return ForceFmz(context, fpType) ? FmzSelect(context, a, b, context.FPAdd(c, ConstF(0f)), fma) : fma;
+         }
+ 
+         public static Operand FPLogarithmB2(this EmitterContext context, Operand a)
+@@ -373,7 +388,8 @@ namespace Ryujinx.Graphics.Shader.Translation
+ 
+         public static Operand FPMultiply(this EmitterContext context, Operand a, Operand b, Instruction fpType = Instruction.FP32)
+         {
+-            return context.Add(fpType | Instruction.Multiply, Local(), a, b);
++            Operand mul = context.Add(fpType | Instruction.Multiply, Local(), a, b);
++            return ForceFmz(context, fpType) ? FmzSelect(context, a, b, ConstF(0f), mul) : mul;
+         }
+ 
+         public static Operand FPNegate(this EmitterContext context, Operand a, bool neg, Instruction fpType = Instruction.FP32)

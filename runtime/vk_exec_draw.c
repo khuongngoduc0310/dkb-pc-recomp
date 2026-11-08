@@ -927,9 +927,16 @@ static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pendin
     int gs = st == NVN_STAGE_VS ? GFX_STAGE_VS : st == NVN_STAGE_FS ? GFX_STAGE_FS :
              st == NVN_STAGE_GS ? GFX_STAGE_GS : st == NVN_STAGE_CS ? GFX_STAGE_CS : -1;
     if (gs < 0) return NULL;
+    // The vertex stage of a program whose fragment stage DKB_FMZ_STAGES names gets the FMZ rule as well: a bad varying
+    // can start in the vertex stage (#10). shader_tab is per program, so other programs keep the plain vertex stage.
+    const uint8_t *fctl, *fcode;
+    uint32_t flen;
+    gfx_shader_fmz_pair = st == NVN_STAGE_VS && find_stage(ex->prog, NVN_STAGE_FS, &fctl, &fcode, &flen) &&
+                          gfx_shader_fmz_listed(fcode);
     const GfxShader *s = await ? gfx_shader_await(gs, ctl, code, len, &a)
                        : pending && vk_pipeline_async_on() ? gfx_shader_get_async(gs, ctl, code, len, &a, pending)
                                                            : gfx_shader_get(gs, ctl, code, len, NULL, &a);
+    gfx_shader_fmz_pair = 0;
     if (pending && *pending) return NULL;
     if (s) slot_mask_learn(serial, st, s);
     if (!s) warn_once(W_SHADER, "a stage %d shader of program %llu failed to translate: draws with it are skipped", st,

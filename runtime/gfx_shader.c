@@ -1530,7 +1530,7 @@ static void trace_note(const uint8_t code_hash[32], const char *how, const uint8
 }
 
 static size_t build_request(char *o0, const char *hex, const char *stage, const char *code_path, const uint8_t *c1,
-                            uint32_t c1_len, const GfxShaderAnswers *a, const uint8_t *control) {
+                            uint32_t c1_len, const GfxShaderAnswers *a, const uint8_t *control, int fmz) {
     char *o = o0;
     o += sprintf(o, "{\"job\":{\"key\":\"");
     json_esc(&o, hex);
@@ -1600,6 +1600,7 @@ static size_t build_request(char *o0, const char *hex, const char *stage, const 
     if (host_sbuf) o += sprintf(o, ",\"sbuf_align\":%u", host_sbuf);
     if (subgroup != 32) o += sprintf(o, ",\"subgroup\":%u", subgroup);
     if (host_gather) o += sprintf(o, ",\"gather_bias\":%u", host_gather);
+    if (fmz) o += sprintf(o, ",\"fmz\":true");
     o += sprintf(o, "},\"out\":\"");
     json_esc(&o, cache_dir);
     o += sprintf(o, "\"}");
@@ -1666,7 +1667,80 @@ typedef struct {
     uint8_t key[32];                                       // cache key, or the provisional one with final 0
     uint8_t iid[32];                                       // input id with final 1
     int final, require_c0;                                 // DKC1 inputs must have versioned NVN 2 reflection
+    int fmz;                                               // DKB local: FMZ rule on every FP32 multiply
 } Req;
+
+// Debugging aid: whether DKB_FMZ_STAGES names the NVN 2 stage a lowered code buffer came from (16-digit hex names, any
+// separators, or "all"). Forcing Maxwell's FMZ rule on chosen stages finds where a NaN or inf comes from (#10, #75). The
+// game's shaders don't ask for the rule, so a stage that needs it marks a bug elsewhere, not a fix.
+int gfx_shader_fmz_listed(const uint8_t *code) {
+    const char *list = cfg_get("TOTK_FMZ_STAGES");
+    if (!list || !strncmp(list, "sel:", 4) || !strncmp(list, "hash:", 5)) return 0;
+    uint64_t origin = nvn2_origin(code);
+    if (!origin) return 0;
+    if (!strcmp(list, "all")) return 1;
+    for (const char *p = list; *p;) {
+        if (!isxdigit((unsigned char)*p)) {
+            p++;
+            continue;
+        }
+        char *end;
+        unsigned long long v = strtoull(p, &end, 16);
+        if (v == origin) return 1;
+        p = end;
+    }
+    return 0;
+}
+
+_Thread_local int gfx_shader_fmz_pair;
+
+// DKB_FMZ_STAGES=hash:<16-digit hex> ... picks shaders by the first 8 bytes of their code hash, the value
+// shader-programs.bin stores: that file keeps first-use order but not the NVN 2 names, so the shaders a run loaded last
+// can be listed from it directly.
+static int fmz_hash_listed(const uint8_t *hash) {
+    const char *list = cfg_get("TOTK_FMZ_STAGES");
+    if (!list || strncmp(list, "hash:", 5)) return 0;
+    uint64_t want = 0;
+    for (int i = 0; i < 8; i++) want = want << 8 | hash[i];
+    for (const char *p = list + 5; *p;) {
+        char *end;
+        unsigned long long v = strtoull(p, &end, 16);
+        if (end == p) p++;
+        else {
+            if (v == want) {
+                rt_log("fmz: selected code hash %016llx", v);
+                return 1;
+            }
+            p = end;
+        }
+    }
+    return 0;
+}
+
+// DKB_FMZ_STAGES=sel:<stage mask>:<bits>:<value> picks shaders for a bisection without naming them: the stages whose bit
+// is set in the hex mask (1 << GFX_STAGE_x) and whose name's top <bits> bits equal the hex <value>. Names are hashes, so
+// each extra bit halves the set. Unlike a named fragment stage, a selected one leaves its vertex stage alone, so the
+// sets stay exact, and the log names every selected stage.
+static int fmz_selected(const uint8_t *code, int stage) {
+    const char *list = cfg_get("TOTK_FMZ_STAGES");
+    unsigned mask = 0, bits = 0;
+    unsigned long long value = 0;
+    if (!list || sscanf(list, "sel:%x:%u:%llx", &mask, &bits, &value) != 3 || bits > 63) return 0;
+    uint64_t origin = nvn2_origin(code);
+    if (!origin || !(mask >> stage & 1) || (bits && origin >> (64 - bits) != value)) return 0;
+    rt_log("fmz: selected stage %016llx kind %d", (unsigned long long)origin, stage);
+    return 1;
+}
+
+// DKB default: with no DKB_FMZ_STAGES value, every vertex stage is translated with FMZ. This is the
+// shipped #75 workaround; DKB_FMZ_STAGES=off disables it, and a named/sel/hash list picks a narrower set.
+static int fmz_default(int stage) {
+    const char *list = cfg_get("TOTK_FMZ_STAGES");
+    if (stage != GFX_STAGE_VS || (list && *list)) return 0;
+    static int logged;
+    if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED)) rt_log("fmz: default all vertex stages");
+    return 1;
+}
 
 // NVN 2 programs (Donkey Kong Bananza): control magic 0x98761234, version 0xC9 at +4, control size at +0x30, code
 // size at +0x38 (docs/bananza-shaders.md).
@@ -1771,6 +1845,14 @@ static int req_init(Req *r, int stage, const uint8_t *control, const uint8_t *co
     r->c1 = c1 ? c1 : code + c1_off;
     if (!build_code_hash(stage, control, code, r->length, r->c1, r->c1_len, r->geometry_input, r->code_hash))
         return fail("out of memory", NULL), 0;
+    // A stage named in DKB_FMZ_STAGES is translated with the FMZ rule on every FP32 multiply (translator patch 0020).
+    // The rule enters the code hash, so its translation is cached apart from the plain one.
+    if ((r->fmz = gfx_shader_fmz_listed(code) || fmz_selected(code, stage) || fmz_hash_listed(r->code_hash) ||
+                  fmz_default(stage) || (gfx_shader_fmz_pair && stage == GFX_STAGE_VS))) {
+        uint8_t buf[36];
+        memcpy(buf, "FMZ1", 4), memcpy(buf + 4, r->code_hash, 32);
+        rt_sha256(buf, sizeof buf, r->code_hash);
+    }
     paths();
     UseMask m;
     r->final = use_find(r->code_hash, &m);
@@ -2040,7 +2122,7 @@ static const GfxShader *translate_one(const Req *r, int stage, const uint8_t *co
     size_t cap = 2 * PATH_CAP * 6 + 2 * r->c1_len + 8192;
     char *req = malloc(cap), reply[LINE_MAX_LEN];
     if (!req) return plat_file_delete(code_path), fail("out of memory", hex);
-    build_request(req, hex, r->stage_name, code_path, r->c1, r->c1_len, a, control);
+    build_request(req, hex, r->stage_name, code_path, r->c1, r->c1_len, a, control, r->fmz);
     int ok = svc_request(req, reply, sizeof reply);
     if (ok && strncmp(reply, "ok ", 3)) dump_failed_request(hex, req, reply, code + skip, (size_t)(r->length - skip));
     free(req);

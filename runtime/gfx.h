@@ -48,6 +48,10 @@ void gfx_shader_nvn2_dump(const uint8_t *control, const uint8_t *code);   // DKB
 int gfx_shader_is_nvn2(const uint8_t *control);                          // NVN 2 control block (gfx_shader.c)
 uint64_t gfx_shader_nvn2_hash(const uint8_t *control, const uint8_t *code);   // DKB_SHADER_DUMP name, 0 if not NVN 2
 uint64_t nvn2_origin(const uint8_t *code);   // that name of the NVN 2 stage a lowered code buffer came from, or 0
+// Whether DKB_FMZ_STAGES names the NVN 2 stage this lowered code came from (gfx_shader.c). A vertex stage requested
+// while gfx_shader_fmz_pair is set (its program's fragment stage is named) gets the FMZ rule too.
+int gfx_shader_fmz_listed(const uint8_t *code);
+extern _Thread_local int gfx_shader_fmz_pair;
 // NVN 2 stage -> NVN 1 control and Maxwell code (nvn2_lower.cpp); 0 when it does not lower
 int nvn2_lower(const uint8_t *control, const uint8_t *code, const uint8_t **out_control, const uint8_t **out_code);
 const GfxShader *gfx_shader_get(int stage, const uint8_t *control, const uint8_t *code, uint64_t code_size,

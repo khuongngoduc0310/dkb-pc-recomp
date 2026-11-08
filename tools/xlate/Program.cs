@@ -233,6 +233,8 @@ static class SwshXlate
         // "softfloat64": true lowers FP64 operations to FP32 (Ryujinx's DoubleToFloat pass), for a host without shaderFloat64.
         public bool QueryHostSupportsShaderFloat64() => _job["softfloat64"] is not JsonValue v || !(v.TryGetValue<bool>(out bool b) && b);
         public bool QueryHostSupportsTextureShadowLod() => true;
+        // "fmz": true applies Maxwell's FMZ rule (0 x anything = 0) to every FP32 multiply (patch 0020).
+        public bool QueryForceFmz() => _job["fmz"] is JsonValue v && v.TryGetValue<bool>(out bool b) && b;
         // Sub-texel precision bits of a host whose gathers round differently from Maxwell (AMD, Intel): Ryujinx then
         // biases gather coordinates so the same texels are picked (TexturePass.InsertCoordGatherBias). 0: no bias.
         public int QueryHostGatherBiasPrecision() => _job["gather_bias"] is JsonNode n ? (int)n : 0;
