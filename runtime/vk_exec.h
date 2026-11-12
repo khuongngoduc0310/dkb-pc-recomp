@@ -133,8 +133,8 @@ VkCommandBuffer vk_exec_inline_begin(int *reopen);
 // from 4 bytes through 8 MiB. Submits/waits the prefix and continues recording; never dereferences a guest address.
 int vk_exec_read_buffer(VkExec *ex, uint64_t addr, uint64_t size, void *out);
 void vk_exec_inline_end(int reopen);
-// vk_exec_draw.c: forget what the command buffer being recorded has bound (pipeline, sets, dynamic state, vertex
-// buffers): the replay continues in a new one (vk_sync_split).
+// vk_exec_draw.c: forget what the command buffer being recorded has bound (pipeline, sets, dynamic state, vertex and
+// index buffers): the replay continues in a new one (vk_sync_split).
 void vk_exec_draw_new_cb(void);
 VkBuffer vk_exec_inline_buffer(VkDeviceSize size);
 // vk_exec.c: the stand-in a 3D BC render target is drawn through goes with its image (vk_exec_image_gone).
@@ -154,6 +154,8 @@ typedef struct {
     uint64_t fb_draws, fb_barriers, fb_restarts, fb_layouts;   // feedback loops: draws sampling a written target of
                                                                // their pass, in-pass barriers, pass restarts, layout
                                                                // transitions
+    uint64_t ib_binds, ib_skips;   // vkCmdBindIndexBuffer recorded, and skipped because the same buffer, offset and type
+                                   // was already bound in this command buffer
 } VkExecFrame;
 extern VkExecFrame vk_exec_frame;
 void vk_exec_frame_written(const tex_t *t);                    // vk_texture_gpu_written: t rendered or copied into

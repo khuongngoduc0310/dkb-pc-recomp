@@ -119,6 +119,10 @@ static struct {
     NVNbufferRange vin[16];              // the ranges they were resolved from, under vk_mem_gen vgen
     uint64_t vgen;
     int vb_valid;
+    VkBuffer ib_buf;                     // index buffer last bound, if ib_valid
+    VkDeviceSize ib_off;
+    VkIndexType ib_type;
+    int ib_valid;
     uint8_t support[SUPPORT_BYTES];      // last support buffer and where it lives
     float sup_in[3];                     // the support_fill arguments it was filled from
     VkBuffer sup_buf;
@@ -149,6 +153,8 @@ static struct { uint32_t n[2], pn[2]; uint8_t sig[2][DS_SIG_BYTES], psig[2][DS_S
 static struct {
     int on;
     uint64_t draws, bind[2], desc[2], push, push_skip, set_new, set_reuse, ac_miss, same_prog, same_all, bind_skip;
+    uint64_t sig, sig_fast, builds, sig_ns, pack_ns;   // signature checks, their fast path, builds and their CPU time
+    uint64_t sig_info, sig_gen, bind_ops, bind_same;   // why the fast path missed, and bind ops that changed nothing
 } BS = {-1};
 
 // The inputs of the last graphics bind_resources (bind_sig) and what its build counted for the traffic census, which a
@@ -186,7 +192,7 @@ static const VkPipeInfo *rs_last;        // the last lookup
 static const RsList *rs_last_l;
 
 static uint32_t c0_dim[3], c0_binst;     // the dispatch size and base instance of the draw or dispatch being bound
-static uint64_t bind_gen = 1;            // bumped by every bind op that writes ex->prog, ubo, ssbo, tex or img
+static uint64_t bind_gen = 1;            // bumped by bind ops whose effective state changes (op_bind_*), not by repeats
 
 static void cb_done(void *arg) {   // completion thread
     CbRes *r = arg;
@@ -217,7 +223,7 @@ static CbRes *cb_res(VkExec *ex) {
     cur = calloc(1, sizeof *cur);
     if (!cur) rt_fatal("vk: out of memory");
     cur_fence = ex->fence;
-    memset(&B, 0, sizeof B);
+    vk_exec_draw_new_cb();   // another submission's command buffer: nothing bound in it
     vk_completion_add(ex->fence, cb_done, cur);
     return cur;
 }
@@ -1773,9 +1779,13 @@ static void bind_stats(const VkPipeInfo *info) {
         rt_log("vk_exec: per draw over %llu draws: vertex %.2f bindings %.2f descriptors, fragment %.2f bindings %.2f descriptors",
                (unsigned long long)BS.draws, BS.bind[0] / d, BS.desc[0] / d, BS.bind[1] / d, BS.desc[1] / d);
         rt_log("vk_exec: per draw: pushes %.3f skipped %.3f, sets written %.3f reused %.3f, texture types %.3f; "
-               "same program and state as the draw before %.3f, also same buffers %.3f; descriptor builds skipped %.3f",
+               "same program and state as the draw before %.3f, also same buffers %.3f",
                BS.push / d, BS.push_skip / d, BS.set_new / d, BS.set_reuse / d, BS.ac_miss / d, BS.same_prog / d,
-               BS.same_all / d, BS.bind_skip / d);
+               BS.same_all / d);
+        rt_log("vk_exec: per draw: signature checks %.3f (info %.3f, generation %.3f, fast %.3f), descriptor builds %.3f "
+               "skipped %.3f; bind ops %.3f (%.3f unchanged, %.3f generation bumps); signature %.2f us, descriptor packing %.2f us",
+               BS.sig / d, BS.sig_info / d, BS.sig_gen / d, BS.sig_fast / d, BS.builds / d, BS.bind_skip / d,
+               BS.bind_ops / d, BS.bind_same / d, (double)(bind_gen - 1) / d, BS.sig_ns / 1e3 / d, BS.pack_ns / 1e3 / d);
     }
 }
 
@@ -1823,7 +1833,8 @@ static int push_skip_on(void) {   // TOTK_PUSH_SKIP=0: every graphics draw pushe
 // - vk_mem_gen (buffer and offset of a span, mirror creation and per-submission sync);
 // - the images in the feedback layout (the sampled layout);
 // - per binding: the support inputs, c0's storage table and base instance, the bound uniform and storage ranges, the
-//   texture and image handles (RsList; compared only when a bind op ran since the last draw, bind_gen);
+//   texture and image handles (RsList; compared only when a bind op changed an effective binding since the last draw,
+//   bind_gen; a rebind of equal handles, ranges or program leaves it alone);
 // - storage buffer addresses read from user uniform blocks (RsList.p, ubo_ptr): compared on every draw, since the
 //   block's contents change without a bind op.
 // The side effects of a build repeat as no-ops in the same command buffer and submission: c0 and support buffers kept
@@ -1906,11 +1917,18 @@ static const RsList *rs_list(const VkExec *ex, const VkPipeInfo *info) {
 }
 
 // The signature of a graphics draw's descriptor inputs into RS; 1 when it equals the stored one. The bound-slot bytes
-// are compared only when a bind op ran since they were stored or the pipeline changed: otherwise they are the same.
+// are compared only when a bind op changed an effective binding since they were stored or the pipeline changed:
+// otherwise they are the same. A rebind of equal values advances neither bind_gen nor the stored signature.
 // Check mode compares them anyway and stops when the bind op generation said they could not differ but they do.
 static int bind_sig(const VkExec *ex, const VkPipeInfo *info) {
+    int stats = bind_stats_on();
+    uint64_t t0 = stats ? kern_now_ns() : 0;
+    if (stats) BS.sig++;
     const RsList *l = rs_list(ex, info);
-    if (!l->ok) return RS.hn = 0, RS.info = NULL, 0;
+    if (!l->ok) {
+        if (t0) BS.sig_ns += kern_now_ns() - t0;
+        return RS.hn = 0, RS.info = NULL, 0;
+    }
     uint64_t *h = RS.h, diff = 0;
     uint32_t n = 0;
 #define PUT(v) do { uint64_t v_ = (uint64_t)(v); diff |= h[n] ^ v_; h[n++] = v_; } while (0)
@@ -1939,8 +1957,13 @@ static int bind_sig(const VkExec *ex, const VkPipeInfo *info) {
 #undef PUT
     diff |= n != RS.hn;
     RS.hn = n;
-    int fast = RS.info == info && RS.gen == bind_gen;
-    if (fast && RS.on != 2) return !diff;
+    int same_info = RS.info == info, same_gen = RS.gen == bind_gen;
+    int fast = same_info && same_gen;
+    if (stats) BS.sig_fast += fast, BS.sig_info += same_info, BS.sig_gen += same_gen;
+    if (fast && RS.on != 2) {
+        if (t0) BS.sig_ns += kern_now_ns() - t0;
+        return !diff;
+    }
     const uint8_t *e = (const uint8_t *)ex;
     uint8_t *d = RS.body;
     int bd = 0;
@@ -1952,6 +1975,7 @@ static int bind_sig(const VkExec *ex, const VkPipeInfo *info) {
     }
     if (fast && bd) rt_fatal("vk_exec: descriptor build skip check: bound slots changed without a bind op");
     RS.info = info, RS.gen = bind_gen;
+    if (t0) BS.sig_ns += kern_now_ns() - t0;
     return !diff && !bd;
 }
 
@@ -1981,7 +2005,9 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
     if (info->n_bindings > MAX_BINDINGS) rt_fatal("vk: %u descriptor bindings exceed the replay's %d", info->n_bindings, MAX_BINDINGS);
     bind_stats(info);
     int gfx = info->bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS;
+    int stats = bind_stats_on();
     int skip = gfx ? bind_skip_on() : 0, same = 0, was_valid = B.res_valid;
+    uint64_t pack_t0 = 0;
     if (skip) {
         same = bind_sig(ex, info);
         if (same && was_valid && skip == 1) {
@@ -1993,6 +2019,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
         B.res_valid = 0;   // until the build below ends
         if (skip == 2) memcpy(RS.pcnt, RS.cnt, sizeof RS.cnt), RS.pncnt = RS.ncnt;
         RS.rec = 1, RS.ncnt = 0, RS.cnt_over = 0, RS.volatile_ = 0, RS.cmds = 0;
+        if (stats) pack_t0 = kern_now_ns(), BS.builds++;
     }
     uint32_t n_sets = info->n_sets ? info->n_sets : 1;
     uint32_t lo[2] = {0, 0}, hi[2] = {0, 0}, d0[2] = {0, 0};   // bindings [lo, hi) and first descriptor per set
@@ -2155,6 +2182,7 @@ static void bind_resources(VkExec *ex, const VkPipeInfo *info) {
             memcpy(RS.ck, d, n);
         }
         B.res_valid = valid;
+        if (pack_t0) BS.pack_ns += kern_now_ns() - pack_t0;
     }
     ex->recorded++;
 }
@@ -2631,12 +2659,26 @@ static void note_work(const VkExec *ex, int kind, uint64_t work) {
     vk_sync_note(kind, a, b, work);
 }
 
+// vkCmdBindIndexBuffer when the command buffer does not already have this buffer, offset and index type bound. The
+// binding survives passes, barriers, pipeline and descriptor changes; only a new command buffer or an external reset
+// ends it, and vk_exec_draw_new_cb clears it (cb_res calls it for a new submission). ex->recorded counts what was
+// actually recorded.
+static void bind_index_buffer(VkExec *ex, VkBuffer buffer, VkDeviceSize offset, VkIndexType type) {
+    if (B.ib_valid && B.ib_buf == buffer && B.ib_off == offset && B.ib_type == type) {
+        vk_exec_frame.ib_skips++;
+        return;
+    }
+    vkCmdBindIndexBuffer(ex->cb, buffer, offset, type);
+    ex->recorded++;
+    B.ib_buf = buffer, B.ib_off = offset, B.ib_type = type, B.ib_valid = 1;
+    vk_exec_frame.ib_binds++;
+}
+
 static void bind_index(VkExec *ex, const void *data, uint64_t bytes, VkIndexType type) {
     VkBuffer b;
     VkDeviceSize o;
     memcpy(scratch(ex, bytes, &b, &o), data, bytes);
-    vkCmdBindIndexBuffer(ex->cb, b, o, type);
-    ex->recorded++;
+    bind_index_buffer(ex, b, o, type);
 }
 
 // The Bananza reset vertex program loses stores through pointers loaded from a list. Match both locally confirmed
@@ -2739,8 +2781,8 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
         return warn_once(W_INDEX, "index buffer %#llx is not aligned to its index size: draw skipped", (unsigned long long)d->ibuf);
     } else {
         VK_MEM_USE(sp);
-        vkCmdBindIndexBuffer(ex->cb, sp.buffer, sp.offset, d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
-        ex->recorded++;
+        bind_index_buffer(ex, sp.buffer, sp.offset,
+                          d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
         vk_mem_count(sp.cls, VK_MUSE_IB, bytes);
         VK_MEM_BOUND(sp);
     }
@@ -2766,9 +2808,10 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
     vk_exec_frame.draws++;
     VK_MEM_USE(ip);
     VK_MEM_USE(ib);
-    vkCmdBindIndexBuffer(ex->cb, ib.buffer, ib.offset, d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+    bind_index_buffer(ex, ib.buffer, ib.offset,
+                      d->itype == NVN_INDEX_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
     vkCmdDrawIndexedIndirect(ex->cb, ip.buffer, ip.offset, 1, sizeof(VkDrawIndexedIndirectCommand));
-    ex->recorded += 2;
+    ex->recorded++;
     note_work(ex, 1, 0);
     // An imported pool's GPU address is its host address (bind_range reads it the same way); device memory is not.
     if (!ip.alloc && vk_sync_noting()) vk_sync_note_args(d->ind);
@@ -2984,23 +3027,100 @@ static void geometry_context_log(const VkExec *ex, uint32_t op, const void *payl
     geometry_context_buffer_log(records, "gs_ubo0", u0);
 }
 
-static void bind_handles(uint64_t *dst, int cap, const p_bind_handles *b) {
+// 1 when the slot's range or size changes; the slot is updated then. stage and index only name the slot.
+static int bind_buf_set(p_bind_buf *dst, const p_bind_buf *b) {
+    if (dst->addr == b->addr && dst->size == b->size) return 0;
+    *dst = *b;
+    return 1;
+}
+
+// 1 when the range's handles change; an invalid range is warned about and changes nothing.
+static int bind_handles(uint64_t *dst, int cap, const p_bind_handles *b) {
     if (b->stage < 0 || b->stage >= 6 || b->first < 0 || b->n < 0 || b->n > 32 || b->first + b->n > cap) {
         warn_once(W_BIND, "a bind of %d handles at %d of stage %d is out of range: ignored", b->n, b->first, b->stage);
+        return 0;
+    }
+    if (!b->n || !memcmp(&dst[b->first], b->h, sizeof(uint64_t) * (size_t)b->n)) return 0;
+    memcpy(&dst[b->first], b->h, sizeof(uint64_t) * (size_t)b->n);
+    return 1;
+}
+
+// 1 when the program or its stage mask changes.
+static int bind_program_set(const prog_t **prog, int32_t *stages, const p_bind_program *b) {
+    if (*prog == b->prog && *stages == b->stages) return 0;
+    *prog = b->prog, *stages = b->stages;
+    return 1;
+}
+
+// 1 when a push writes different words or marks words written that were not; the bank and mask update either way.
+// A newly written zero is a change even when the bank already held zero: it replaces a synthetic default (ubo_info slot
+// 17) that an unwritten word falls back to.
+static int bind_push_set(uint32_t bank[NVN2_ROOT_WORDS], uint64_t *written, int w0, const uint32_t *w, int n) {
+    uint64_t add = (n >= 64 ? ~0ull : ((1ull << n) - 1)) << w0;
+    int changed = ((*written & add) != add) || memcmp(&bank[w0], w, 4 * (size_t)n);
+    memcpy(&bank[w0], w, 4 * (size_t)n);
+    *written |= add;
+    return changed;
+}
+
+// TOTK_BIND_STATS: how many bind ops there were and how many left their binding unchanged. Only effective changes
+// advance bind_gen, so an unchanged bind leaves bind_sig's fast path valid (see bind_skip_on).
+static void bind_count(int changed) {
+    if (BS.on < 0) bind_stats_on();
+    if (!BS.on) return;
+    BS.bind_ops++;
+    if (!changed) BS.bind_same++;
+}
+
+// The bind ops below advance bind_gen only when the state their signature and descriptor build read really changes.
+static void op_bind_program(VkExec *ex, const p_bind_program *b) {
+    int changed = bind_program_set(&ex->prog, &ex->prog_stages, b);
+    bind_count(changed);
+    if (changed) bind_gen++;
+}
+
+static void op_bind_ubo(VkExec *ex, const p_bind_buf *b) {
+    int changed = b->stage >= 0 && b->stage < 6 && b->index >= 0 && b->index < 18 &&
+                  bind_buf_set(&ex->ubo[b->stage][b->index], b);
+    bind_count(changed);
+    if (changed) bind_gen++;
+}
+
+static void op_bind_ssbo(VkExec *ex, const p_bind_buf *b) {
+    if (b->stage >= 0 && b->stage < 6 && b->index >= 0 && b->index < 16) {
+        int changed = bind_buf_set(&ex->ssbo[b->stage][b->index], b);
+        bind_count(changed);
+        if (changed) bind_gen++;
+    } else {   // past the table: dropped (NVN 2 binds more storage buffers per stage than NVN 1's 16)
+        static uint64_t seen[6];
+        if (b->stage >= 0 && b->stage < 6 && b->index >= 0 && b->index < 64 && !(seen[b->stage] >> b->index & 1))
+            seen[b->stage] |= 1ull << b->index, rt_log("vk: storage buffer %d of stage %d dropped", b->index, b->stage);
+    }
+}
+
+static void op_bind_handles(VkExec *ex, const p_bind_handles *b, int img) {
+    uint64_t *dst = b->stage >= 0 && b->stage < 6 ? (img ? ex->img[b->stage] : ex->tex[b->stage]) : NULL;
+    int changed = bind_handles(dst, img ? 32 : 128, b);
+    bind_count(changed);
+    if (changed) ex->tex_serial++, bind_gen++;
+}
+
+static void op_bind_push(VkExec *ex, const p_push_const *p) {
+    if (p->table < 0 || p->table >= NVN2_ROOT_TABLES || (!p->compute && p->table != 0)) {
+        static int warned;
+        if (!warned++) rt_log("vk: push constants into root table %d dropped", p->table);
         return;
     }
-    memcpy(&dst[b->first], b->h, sizeof(uint64_t) * (size_t)b->n);
+    int k = p->compute != 0, w0 = p->offset / 4, n = p->bytes / 4;
+    int changed = bind_push_set(ex->push[k][p->table], &ex->push_set[k][p->table], w0, p->w, n);
+    bind_count(changed);
+    if (changed) bind_gen++;
 }
 
 void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
     geometry_context_log(ex, op, payload);
     switch (op) {
-    case OP_BIND_PROGRAM: {
-        const p_bind_program *b = payload;
-        ex->prog = b->prog, ex->prog_stages = b->stages;
-        bind_gen++;
-        break;
-    }
+    case OP_BIND_PROGRAM: op_bind_program(ex, payload); break;
     case OP_BIND_STATE: {
         const p_bind_state *b = payload;
         blend_st bs;
@@ -3039,55 +3159,16 @@ void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
         memcpy(&ex->vbuf[b->first], b->r, sizeof(NVNbufferRange) * (size_t)b->n);
         break;
     }
-    case OP_BIND_UBO: {
-        const p_bind_buf *b = payload;
-        if (b->stage >= 0 && b->stage < 6 && b->index >= 0 && b->index < 18) ex->ubo[b->stage][b->index] = *b;
-        bind_gen++;
-        break;
-    }
-    case OP_PUSH_CONST: {
-        const p_push_const *p = payload;
-        if (p->table < 0 || p->table >= NVN2_ROOT_TABLES || (!p->compute && p->table != 0)) {
-            static int warned;
-            if (!warned++) rt_log("vk: push constants into root table %d dropped", p->table);
-            break;
-        }
-        int k = p->compute != 0, w0 = p->offset / 4, n = p->bytes / 4;
-        memcpy(&ex->push[k][p->table][w0], p->w, 4 * (size_t)n);
-        ex->push_set[k][p->table] |= (n >= 64 ? ~0ull : ((1ull << n) - 1)) << w0;
-        bind_gen++;
-        break;
-    }
-    case OP_BIND_SSBO: {
-        const p_bind_buf *b = payload;
-        if (b->stage >= 0 && b->stage < 6 && b->index >= 0 && b->index < 16) ex->ssbo[b->stage][b->index] = *b;
-        else {   // past the table: dropped (NVN 2 binds more storage buffers per stage than NVN 1's 16)
-            static uint64_t seen[6];
-            if (b->stage >= 0 && b->stage < 6 && b->index >= 0 && b->index < 64 && !(seen[b->stage] >> b->index & 1))
-                seen[b->stage] |= 1ull << b->index, rt_log("vk: storage buffer %d of stage %d dropped", b->index, b->stage);
-        }
-        bind_gen++;
-        break;
-    }
-    case OP_BIND_TEX: {
-        const p_bind_handles *b = payload;
-        bind_handles(b->stage >= 0 && b->stage < 6 ? ex->tex[b->stage] : NULL, 128, b);
-        ex->tex_serial++;
-        bind_gen++;
-        break;
-    }
+    case OP_BIND_UBO: op_bind_ubo(ex, payload); break;
+    case OP_PUSH_CONST: op_bind_push(ex, payload); break;
+    case OP_BIND_SSBO: op_bind_ssbo(ex, payload); break;
+    case OP_BIND_TEX: op_bind_handles(ex, payload, 0); break;
     case OP_BIND_SAMP: {
         const p_bind_handles *b = payload;
         bind_handles(b->stage >= 0 && b->stage < 6 ? ex->samp[b->stage] : NULL, 128, b);
         break;
     }
-    case OP_BIND_IMG: {
-        const p_bind_handles *b = payload;
-        bind_handles(b->stage >= 0 && b->stage < 6 ? ex->img[b->stage] : NULL, 32, b);
-        ex->tex_serial++;   // the shader memo's handle check (feedback_scan reads only textures: a rescan at most)
-        bind_gen++;
-        break;
-    }
+    case OP_BIND_IMG: op_bind_handles(ex, payload, 1); break;
     case OP_UPDATE_UB: op_update_ub(ex, payload); break;
     case OP_DRAW: op_draw(ex, payload); break;
     case OP_DRAW_IDX: op_draw_idx(ex, payload); break;

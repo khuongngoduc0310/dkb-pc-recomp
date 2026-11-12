@@ -203,7 +203,10 @@ change passes these, all run with `.venv`:
 Runtime probes, each a mode of `totk.exe` (the list is at the top of `runtime/main.c`): `--probe-kernel`,
 `--probe-vkexec`, `--probe-nvn-tex` and `--probe-shader` cover most runtime changes. `--probe-shader` and the draw
 part of `--probe-vkexec` translate shaders of the census below: they look for `build/<ver>/shaders/jobs.json` of the
-exe's own version first, then of the other one.
+exe's own version first, then of the other one. `tests\index_bind_cache_test.py` checks the replay's index-buffer
+binding cache (repeat skips, the new-command-buffer reset, byte-index widening and indirect spans) without Vulkan;
+`tests\bind_gen_test.py` checks that only effective bind changes advance `bind_gen` (repeat UBO, SSBO, texture, image,
+program and push-constant binds leave it alone).
 
 Shaders: `.venv-py314\Scripts\python tools\shader_census.py --version <ver> --translate` extracts every Maxwell shader
 to `build\<ver>\shaders\` and runs it through the translator and `spirv-val`; failure groups go to `failures.txt`.
